@@ -498,6 +498,7 @@ template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 std::tuple<persistent::version_t, uint64_t> PersistentCascadeStore<KT, VT, IK, IV, ST>::put(const VT& value) {
     debug_enter_func_with_args("value.get_key_ref()={}", value.get_key_ref());
     derecho::Replicated<PersistentCascadeStore>& subgroup_handle = group->template get_subgroup<PersistentCascadeStore>(this->subgroup_index);
+    dbg_default_debug("start ordered put");
     auto results = subgroup_handle.template ordered_send<RPC_NAME(ordered_put)>(value);
     auto& replies = results.get();
     std::tuple<persistent::version_t, uint64_t> ret(CURRENT_VERSION, 0);
@@ -684,7 +685,6 @@ std::tuple<persistent::version_t, uint64_t> PersistentCascadeStore<KT, VT, IK, I
                 group->template get_subgroup<PersistentCascadeStore>(this->subgroup_index).get_shard_num(),
                 value.get_key_ref(), value, nullptr /*cascade context*/);
     }
-
     debug_leave_func_with_value("version=0x{:x},timestamp={}", std::get<0>(version_and_timestamp), std::get<1>(version_and_timestamp));
 
     return version_and_timestamp;
@@ -799,7 +799,7 @@ std::tuple<persistent::version_t, uint64_t> WANPersistentCascadeStore<KT, VT, IK
             "in reply, version=0x{:x},timestamp={}; in value variable, version=0x{:x}",
             std::get<0>(ret), std::get<1>(ret), value.get_version());
 
-    /* determine whehter or not to invoke do_wan_agent_send itself */
+    /* determine whether or not to invoke do_wan_agent_send itself */
 
     /* TODO: for now, if we use Cascade Service, we cannot determine 
      * wan_sender_in_my_shard in view_upcall, so temporally set it here.
@@ -830,12 +830,70 @@ std::tuple<persistent::version_t, uint64_t> WANPersistentCascadeStore<KT, VT, IK
 
     return ret;
 }
+
+template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
+wan_agent::Blob WANPersistentCascadeStore<KT, VT, IK, IV, ST>::read(const VT& value, const std::string& key) {
+    debug_enter_func_with_args("value.key={}", value.key);
+    derecho::Replicated<WANPersistentCascadeStore>& subgroup_handle = group->template get_subgroup<WANPersistentCascadeStore>(this->subgroup_index);
+    auto results = subgroup_handle.template ordered_send<RPC_NAME(ordered_put)>(value);
+    auto& replies = results.get();
+    for(auto& reply_pair : replies) {
+        reply_pair.second.get();
+    }
+
+    if(wan_sender_in_my_shard == static_cast<node_id_t>(-1)) {
+        uint32_t shard_num = subgroup_handle.template get_shard_num();
+        std::vector<std::vector<node_id_t>> subgroup_members = group->template get_subgroup_members<WANPersistentCascadeStore>(subgroup_index);
+        wan_sender_in_my_shard = subgroup_members.at(shard_num).at(0);
+        dbg_default_info("Did not set wan_sender_in_my_shard in view_upcall, broadcast it to be {}", wan_sender_in_my_shard);
+        subgroup_handle.template ordered_send<RPC_NAME(set_wan_sender_info)>(wan_sender_in_my_shard);
+    }
+
+    node_id_t my_id = getConfUInt32(CONF_DERECHO_LOCAL_ID);
+
+    if(wan_sender_in_my_shard == my_id) {
+        return std::move(do_wan_agent_read(key));
+    } else {
+        auto res = subgroup_handle.template p2p_send<RPC_NAME(do_wan_agent_read)>(wan_sender_in_my_shard, key);
+        return std::move(res.get().get(wan_sender_in_my_shard));
+    }
+}
+
+template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
+uint64_t WANPersistentCascadeStore<KT, VT, IK, IV, ST>::write(const VT& value, const std::string& key) {
+    debug_enter_func_with_args("value.key={}", value.key);
+    derecho::Replicated<WANPersistentCascadeStore>& subgroup_handle = group->template get_subgroup<WANPersistentCascadeStore>(this->subgroup_index);
+    auto results = subgroup_handle.template ordered_send<RPC_NAME(ordered_put)>(value);
+    auto& replies = results.get();
+    for(auto& reply_pair : replies) {
+        reply_pair.second.get();
+    }
+
+    if(wan_sender_in_my_shard == static_cast<node_id_t>(-1)) {
+        uint32_t shard_num = subgroup_handle.template get_shard_num();
+        std::vector<std::vector<node_id_t>> subgroup_members = group->template get_subgroup_members<WANPersistentCascadeStore>(subgroup_index);
+        wan_sender_in_my_shard = subgroup_members.at(shard_num).at(0);
+        dbg_default_info("Did not set wan_sender_in_my_shard in view_upcall, broadcast it to be {}", wan_sender_in_my_shard);
+        subgroup_handle.template ordered_send<RPC_NAME(set_wan_sender_info)>(wan_sender_in_my_shard);
+    }
+
+    node_id_t my_id = getConfUInt32(CONF_DERECHO_LOCAL_ID);
+
+    if(wan_sender_in_my_shard == my_id) {
+        return do_wan_agent_write(value, key);
+    } else {
+        auto res = subgroup_handle.template p2p_send<RPC_NAME(do_wan_agent_write)>(wan_sender_in_my_shard, value, key);
+        return res.get().get(wan_sender_in_my_shard);
+    }
+}
+
 template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 void WANPersistentCascadeStore<KT, VT, IK, IV, ST>::start_wanagent(){
     if(!wan_agent_sender) {
         init_wan_config();
     }
 }
+
 template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 void WANPersistentCascadeStore<KT, VT, IK, IV, ST>::do_wan_agent_send(const VT& value) {
     if(!wan_agent_sender) {
@@ -870,6 +928,54 @@ void WANPersistentCascadeStore<KT, VT, IK, IV, ST>::do_wan_agent_send(const VT& 
     }
 
     debug_leave_func_with_value("Send to WanAgent server {} bytes.", actual_size);
+}
+
+template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
+uint64_t WANPersistentCascadeStore<KT, VT, IK, IV, ST>::do_wan_agent_write(const VT& value, const std::string& key) {
+    if(!wan_agent_sender) {
+        init_wan_config();
+    }
+
+    // byte_size/actual_size may be larger than WAN_AGENT_MAX_PAYLOAD_SIZE
+    size_t byte_size = value.bytes_size();
+    char* buffer = static_cast<char*>(malloc(byte_size));
+    size_t actual_size = value.to_bytes(buffer);
+    // std::cout << "Alloc size: " << byte_size << ", actual size: " << actual_size << std::endl;
+    if(byte_size != actual_size) {
+        throw std::runtime_error("to_bytes() and bytes_size() return different size");
+    }
+
+    // do not use wan_agent::WAN_AGENT_MAX_PAYLOAD_SIZE, macro define is not constrained by namespace, even class definition, function definition
+    const size_t wan_max_payload_size = wan_conf_json[WAN_AGENT_MAX_PAYLOAD_SIZE];
+    uint64_t ret = 0;
+
+    if(actual_size < wan_max_payload_size) {
+        ret = wan_agent_sender->send_write_req(buffer, actual_size, key);
+    } else  // !!!! This will not work properly since each write request will create a new version !!!!
+    {
+        while(actual_size > wan_max_payload_size) {
+            ret = wan_agent_sender->send_write_req(buffer, wan_max_payload_size, key);
+            buffer += wan_max_payload_size;
+            actual_size -= wan_max_payload_size;
+        }
+        // if there is still some remain message
+        if(actual_size > 0) {
+            ret = wan_agent_sender->send_write_req(buffer, actual_size, key);
+        }
+    }
+
+    debug_leave_func_with_value("Send to WanAgent server {} bytes.", actual_size);
+    return ret;
+}
+
+template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
+wan_agent::Blob WANPersistentCascadeStore<KT, VT, IK, IV, ST>::do_wan_agent_read(const std::string& key) {
+    if(!wan_agent_sender) {
+        init_wan_config();
+    }
+    auto read_future = std::move(wan_agent_sender->send_read_req(key));
+
+    return std::move(read_future.get().second);
 }
 
 template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>

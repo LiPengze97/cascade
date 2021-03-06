@@ -1,14 +1,22 @@
 #pragma once
+#include <derecho/mutils-serialization/SerializationSupport.hpp>
+#include <derecho/persistent/HLC.hpp>
+#include <derecho/persistent/Persistent.hpp>
+#include <derecho/openssl/signature.hpp>
+#include <derecho/persistent/detail/util.hpp>
 #include <atomic>
 #include <condition_variable>
 #include <exception>
 #include <functional>
 #include <list>
+#include <future>
 #include <map>
 #include <memory>
+#include <queue>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
+#include <utility>
 #include <wan_agent/wan_agent_type_definitions.hpp>
 // #include <wan_agent/wan_agent_utils.hpp>
 #include "pre_driver.hpp"
@@ -51,13 +59,79 @@ using PredicateLambda = std::function<void(const std::map<site_id_t, uint64_t>&)
 using ReportACKFunc = std::function<void()>;
 using NotifierFunc = std::function<void()>;
 
+class Blob : public mutils::ByteRepresentable {
+public:
+    char* bytes;
+    std::size_t size;
+    bool is_temporary;
+
+    Blob(const char* const b, const decltype(size) s);
+
+    Blob(char* b, const decltype(size) s, bool temporary);
+
+    Blob(const Blob& other);
+
+    Blob(Blob&& other);
+
+    Blob();
+
+    virtual ~Blob();
+
+    Blob& operator=(Blob&& other);
+
+    Blob& operator=(const Blob& other);
+
+    std::size_t to_bytes(char* v) const;
+
+    std::size_t bytes_size() const;
+
+    void post_object(const std::function<void(char const* const, std::size_t)>& f) const;
+
+    void ensure_registered(mutils::DeserializationManager&) {}
+
+    static std::unique_ptr<Blob> from_bytes(mutils::DeserializationManager*, const char* const v);
+
+    mutils::context_ptr<Blob> from_bytes_noalloc(
+        mutils::DeserializationManager* ctx,
+        const char* const v);
+
+    mutils::context_ptr<Blob> from_bytes_noalloc_const(
+        mutils::DeserializationManager* ctx,
+        const char* const v);
+};
+
+using read_future_t = std::future<std::pair<persistent::version_t, Blob>>;
+using read_promise_t = std::promise<std::pair<persistent::version_t, Blob>>;
+
+
+// TODO: how to have multiple wan agents on one site?
+// I decided to hand this to applications. For example, an application could
+// create a Derecho subgroup with multiple WAN agent nodes, each of which joins
+// a parallel WAN group doing exactly the same thing. In each of the WAN group,
+// the messages is ordered. But no guarantee across WAN groups. The application
+// should taking care of this when they try to leverage the bandwidth benefits of
+// multiple WAN groups.
+
+struct RequestHeader {
+    uint32_t requestType;
+    size_t key_size;
+    uint64_t seq;
+    uint32_t site_id;
+    size_t payload_size;
+};
+
+struct Response {
+    size_t payload_size;
+    uint64_t seq;
+    uint32_t site_id;
+};
+
 /**
      * remote message callback function type
-     * @param const site_id_t: site id.
+     * @param const RequestHeader&: the copy of request header
      * @param const char*: message in byte array
-     * @param const size_t: message size.
      */
-using RemoteMessageCallback = std::function<void(const site_id_t, const char*, const size_t)>;
+using RemoteMessageCallback = std::function<void(const uint32_t, const char*, const size_t)>;
 
 /**
      * The Wan Agent abstract class
@@ -123,24 +197,6 @@ public:
     }
 };
 
-// TODO: how to have multiple wan agents on one site?
-// I decided to hand this to applications. For example, an application could
-// create a Derecho subgroup with multiple WAN agent nodes, each of which joins
-// a parallel WAN group doing exactly the same thing. In each of the WAN group,
-// the messages is ordered. But no guarantee across WAN groups. The application
-// should taking care of this when they try to leverage the bandwidth benefits of
-// multiple WAN groups.
-
-struct RequestHeader {
-    uint64_t seq;
-    uint32_t site_id;
-    size_t payload_size;
-};
-
-struct Response {
-    uint64_t seq;
-    uint32_t site_id;
-};
 
 // class WanAgentServer;
 // the Server worker
@@ -214,8 +270,11 @@ public:
 };
 
 struct LinkedBufferNode {
+    std::string message_key;
     size_t message_size;
     char* message_body;
+    uint32_t message_type;
+    uint64_t global_seq;
     LinkedBufferNode* next;
 
     LinkedBufferNode() {}
@@ -259,6 +318,8 @@ private:
     std::atomic<bool> thread_shutdown;
     const int N_MSG = 520000;
 
+    std::map<uint64_t, std::pair<persistent::version_t, char*> > pending_responces;
+
 public:
     std::vector<pre_operation> operations;
     // uint64_t *buffer_size = static_cast<uint64_t *>(malloc(sizeof(uint64_t) * N_MSG));
@@ -292,8 +353,15 @@ public:
     double transfer_data_cost = 0;
     double get_size_cost = 0;
 
+    uint64_t global_seq_ctr = 0; //assign seq number upon enqueue
+
     std::mutex stability_frontier_set_mutex;
     std::condition_variable stability_frontier_set_cv;
+
+    std::map<uint64_t, read_promise_t> read_promise_store;
+    std::mutex read_promise_lock;
+    std::map<uint64_t, std::pair<persistent::version_t, Blob> > read_object_store;
+
     MessageSender(const site_id_t& local_site_id,
                   const std::map<site_id_t, std::pair<ip_addr_t, uint16_t>>& server_sites_ip_addrs_and_ports,
                   const size_t& n_slots, const size_t& max_payload_size,
@@ -301,7 +369,9 @@ public:
                   const ReportACKFunc& report_new_ack);
 
     void recv_ack_loop();
-    void enqueue(const char* payload, const size_t payload_size);
+    void update_read_seq(const uint64_t seq, const persistent::version_t version, Blob&& obj);
+    uint64_t enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const std::string& key);
+    read_future_t read_enqueue(const std::string& key);
     void send_msg_loop();
     void predicate_calculation();
     void wait_stability_frontier_loop(int sf);
@@ -314,6 +384,7 @@ public:
 };
 
 class WanAgentSender : public WanAgent {
+
 private:
     /** the conditional variable and thread for notification */
     std::mutex new_ack_mutex;
@@ -363,10 +434,16 @@ public:
     /**
          * send the message
          */
-    virtual uint64_t send(const char* message, const size_t message_size) {
-        message_sender->enqueue(message, message_size);
-        return 0ull;
+    virtual void send(const char* message, const size_t message_size) {
+        this->message_sender->enqueue(1, message, message_size, "PURE_MESSAGE");
     }
+    virtual uint64_t send_write_req(const char* payload, const size_t payload_size, const std::string& key) {
+        return this->message_sender->enqueue(1, payload, payload_size, key);
+    }
+    read_future_t send_read_req(const std::string& key) {
+        return std::move(this->message_sender->read_enqueue(key));
+    }
+
     void submit_predicate(std::string key, std::string predicate_str, bool inplace);
 
     void generate_predicate();

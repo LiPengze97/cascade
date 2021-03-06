@@ -15,7 +15,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <vector>
-
 #include <wan_agent/logger.hpp>
 #include <wan_agent/wan_agent.hpp>
 #include <wan_agent/wan_agent_utils.hpp>
@@ -27,6 +26,111 @@ inline uint64_t get_time_us() {
 }
 
 namespace wan_agent {
+
+Blob::Blob(const char* const b, const decltype(size) s) :
+    bytes(nullptr), size(0), is_temporary(false) {
+    if(s > 0) {
+        bytes = new char[s];
+        if (b != nullptr) {
+            memcpy(bytes, b, s);
+        } else {
+            bzero(bytes, s);
+        }
+        size = s;
+    }
+}
+
+Blob::Blob(char* b, const decltype(size) s, bool temporary) :
+    bytes(b), size(s), is_temporary(temporary) {
+    if ( (size>0) && (is_temporary==false)) {
+        bytes = new char[s];
+        if (b != nullptr) {
+            memcpy(bytes, b, s);
+        } else {
+            bzero(bytes, s);
+        }
+    }
+    // exclude illegal argument combination like (0x982374,0,false)
+    if (size == 0) {
+        bytes = nullptr;
+    }
+}
+
+Blob::Blob(const Blob& other) :
+    bytes(nullptr), size(0) {
+    if(other.size > 0) {
+        bytes = new char[other.size];
+        memcpy(bytes, other.bytes, other.size);
+        size = other.size;
+    }
+}
+
+Blob::Blob(Blob&& other) : 
+    bytes(other.bytes), size(other.size) {
+    other.bytes = nullptr;
+    other.size = 0;
+}
+
+Blob::Blob() : bytes(nullptr), size(0) {}
+
+Blob::~Blob() {
+    if(bytes && !is_temporary) {
+        delete [] bytes;
+    }
+}
+
+Blob& Blob::operator=(Blob&& other) {
+    char* swp_bytes = other.bytes;
+    std::size_t swp_size = other.size;
+    other.bytes = bytes;
+    other.size = size;
+    bytes = swp_bytes;
+    size = swp_size;
+    return *this;
+}
+
+Blob& Blob::operator=(const Blob& other) {
+    if(bytes != nullptr) {
+        delete bytes;
+    }
+    size = other.size;
+    if(size > 0) {
+        bytes = new char[size];
+        memcpy(bytes, other.bytes, size);
+    } else {
+        bytes = nullptr;
+    }
+    return *this;
+}
+
+std::size_t Blob::to_bytes(char* v) const {
+    ((std::size_t*)(v))[0] = size;
+    if(size > 0) {
+        memcpy(v + sizeof(size), bytes, size);
+    }
+    return size + sizeof(size);
+}
+
+std::size_t Blob::bytes_size() const {
+    return size + sizeof(size);
+}
+
+void Blob::post_object(const std::function<void(char const* const, std::size_t)>& f) const {
+    f((char*)&size, sizeof(size));
+    f(bytes, size);
+}
+
+mutils::context_ptr<Blob> Blob::from_bytes_noalloc(mutils::DeserializationManager* ctx, const char* const v) {
+    return mutils::context_ptr<Blob>{new Blob(const_cast<char*>(v) + sizeof(std::size_t), ((std::size_t*)(v))[0], true)};
+}
+
+mutils::context_ptr<Blob> Blob::from_bytes_noalloc_const(mutils::DeserializationManager* ctx, const char* const v) {
+    return mutils::context_ptr<Blob>{new Blob(const_cast<char*>(v) + sizeof(std::size_t), ((std::size_t*)(v))[0], true)};
+}
+
+std::unique_ptr<Blob> Blob::from_bytes(mutils::DeserializationManager*, const char* const v) {
+    return std::make_unique<Blob>(v + sizeof(std::size_t), ((std::size_t*)(v))[0]);
+}
 
 void WanAgent::load_config() noexcept(false) {
     log_enter_func();
@@ -300,24 +404,62 @@ MessageSender::MessageSender(const site_id_t& local_site_id,
     log_exit_func();
 }
 
+void MessageSender::update_read_seq(const uint64_t seq, const persistent::version_t version, Blob&& obj) {
+    std::pair<persistent::version_t, Blob>& obj_in_store = read_object_store[seq];
+    if (version >= obj_in_store.first || obj_in_store.second.size == 0) { //TODO: fix the bug here
+        obj_in_store.first = version;
+        obj_in_store.second = obj;
+    }
+    //maybe do this in another thread ?
+    auto cur_sf = stability_frontier;
+    read_promise_lock.lock();
+    std::cout << "current sf = " << cur_sf << std::endl;
+    std::cout << "prev object store size = " << read_object_store.size() << std::endl;
+    // note that cur_sf = message seq number + 1
+    for (auto iter = read_promise_store.begin(); iter->first < cur_sf && iter != read_promise_store.end(); ) {
+        std::cout << "set value for promise of request " << iter->first << " object size = " << read_object_store[iter->first].second.size << std::endl;
+        iter->second.set_value(read_object_store[iter->first]);
+        read_object_store.erase(read_object_store.find(iter->first)); //delete the temporary object store
+        iter = read_promise_store.erase(iter);
+    }
+    std::cout << "current object store size = " << read_object_store.size() << std::endl;
+    read_promise_lock.unlock();
+}
+
 void MessageSender::recv_ack_loop() {
     log_enter_func();
     struct epoll_event events[EPOLL_MAXEVENTS];
     while(!thread_shutdown.load()) {
-        // std::cout << "in recv_ack_loop, thread_shutdown.load() is " << thread_shutdown.load() << std::endl;
+        std::cout << "in recv_ack_loop, thread_shutdown.load() is " << thread_shutdown.load() << std::endl;
         int n = epoll_wait(epoll_fd_recv_ack, events, EPOLL_MAXEVENTS, -1);
         for(int i = 0; i < n; i++) {
             if(events[i].events & EPOLLIN) {
                 // received ACK
                 Response res;
-                sock_read(events[i].data.fd, res);
-                log_info("received ACK from {} for msg {}", res.site_id, res.seq);
+                auto success = sock_read(events[i].data.fd, res);
+                if (!success) {
+                    throw std::runtime_error("failed receiving ACK message");
+                }
+                std::cout << "received ACK from " << res.site_id << " for msg " << res.seq << std::endl;
                 if(message_counters[res.site_id] != res.seq) {
                     throw std::runtime_error("sequence number is out of order for site-" + std::to_string(res.site_id) + ", counter = " + std::to_string(message_counters[res.site_id].load()) + ", seqno = " + std::to_string(res.seq));
                 }
                 message_counters[res.site_id]++;
                 uint64_t pre_cal_st_time = get_time_us();
                 predicate_calculation();
+                auto obj_size = res.payload_size;
+                if (obj_size) {
+                    std::cout << "receiving object for read request " << res.seq << " from " << res.site_id << std::endl;
+                    persistent::version_t new_version;
+                    success = sock_read(events[i].data.fd, new_version);
+                    std::cout << "version = " << new_version << std::endl;
+                    char* obj_buf = (char*)malloc(obj_size);
+                    success &= sock_read(events[i].data.fd, obj_buf, obj_size);
+                    if (!success)
+                        throw std::runtime_error("failed receiving object for read request");
+                    std::cout << "obj_size = " << ' ' << obj_size << " obj = " << obj_buf << std::endl;
+                    update_read_seq(res.seq, new_version, std::move(Blob(std::move(obj_buf), obj_size)));
+                }
                 transfer_data_cost += (get_time_us() - pre_cal_st_time) / 1000000.0;
                 // if(res.seq == wait_target_sf) {
                 //     ack_keeper[res.site_id - 1000] = get_time_us();
@@ -328,6 +470,7 @@ void MessageSender::recv_ack_loop() {
     // std::cout << "in recv_ack_loop, thread_shutdown.load() is " << thread_shutdown.load() << std::endl;
     log_exit_func();
 }
+
 void MessageSender::predicate_calculation() {
     log_enter_func();
     std::vector<int> value_ve;
@@ -473,17 +616,50 @@ void MessageSender::wait_stability_frontier_loop(int sf) {
     stability_frontier_set_cv.notify_one();
 }
 
-void MessageSender::enqueue(const char* payload, const size_t payload_size) {
-    // std::unique_lock<std::mutex> lock(mutex);
+uint64_t MessageSender::enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const std::string& key) {
+        // std::unique_lock<std::mutex> lock(mutex);
     size_mutex.lock();
     LinkedBufferNode* tmp = new LinkedBufferNode();
     tmp->message_size = payload_size;
-    tmp->message_body = (char*)malloc(payload_size);
-    memcpy(tmp->message_body, payload, payload_size);
+    if (!payload_size) {
+        tmp->message_body = nullptr;
+        tmp->message_size = 0;
+    } else {
+        tmp->message_body = (char*)malloc(payload_size);
+        memcpy(tmp->message_body, payload, payload_size);
+    }
+    tmp->message_type = requestType;
+    tmp->message_key = key;
+    tmp->global_seq = global_seq_ctr++;
+
     buffer_list.push_back(*tmp);
     enter_queue_time_keeper[msg_idx++] = get_time_us();
     size_mutex.unlock();
     not_empty.notify_one();
+    return global_seq_ctr;
+}
+
+read_future_t MessageSender::read_enqueue(const std::string& key) {
+    size_mutex.lock();
+    LinkedBufferNode* tmp = new LinkedBufferNode();
+    tmp->message_body = nullptr;
+    tmp->message_size = 0;
+    tmp->message_type = 0;
+    tmp->message_key = key;
+    tmp->global_seq = global_seq_ctr++;
+
+    //set the read promise store before push_back
+    read_promise_lock.lock();
+    read_promise_t new_promise;
+    read_future_t ret_future = new_promise.get_future();
+    read_promise_store.emplace(tmp->global_seq, std::move(new_promise));
+    read_promise_lock.unlock();
+
+    buffer_list.push_back(*tmp);
+    enter_queue_time_keeper[msg_idx++] = get_time_us();
+    size_mutex.unlock();
+    not_empty.notify_one();
+    return std::move(ret_future);
 }
 
 void MessageSender::send_msg_loop() {
@@ -507,16 +683,24 @@ void MessageSender::send_msg_loop() {
                     continue;
                 }
                 // auto pos = (offset + head) % n_slots;
-
-                size_t payload_size = buffer_list.front().message_size;
+                auto node = buffer_list.front();
+                size_t payload_size = node.message_size;
+                auto requestType = node.message_type;
+                auto key = node.message_key;
                 // decode paylaod_size in the beginning
                 // memcpy(&payload_size, buf[pos].get(), sizeof(size_t));
                 auto curr_seqno = last_sent_seqno[site_id] + 1;
+                if (curr_seqno != node.global_seq) {
+                    throw std::runtime_error("Something wrong with the seq number");
+                }
                 // log_info("sending msg {} to site {}.", curr_seqno, site_id);
                 // send over socket
                 // time_keeper[curr_seqno*4+site_id-1] = now_us();
-                sock_write(events[i].data.fd, RequestHeader{curr_seqno, local_site_id, payload_size});
-                sock_write(events[i].data.fd, buffer_list.front().message_body, payload_size);
+                sock_write(events[i].data.fd, RequestHeader{requestType, key.size(), curr_seqno, local_site_id, payload_size});
+                if (key.size())
+                    sock_write(events[i].data.fd, key.c_str(), key.size());
+                if (payload_size) 
+                    sock_write(events[i].data.fd, node.message_body, payload_size);
                 leave_queue_time_keeper[curr_seqno * 7 + site_id - 1000] = get_time_us();
                 // buffer_size[curr_seqno] = size;
 
@@ -722,19 +906,19 @@ void WanAgentSender::out_out_file() {
     // file2.close();
 
     /**record every message arrive to see each file's performance**/
-    std::ofstream file3("./all_sf_for_each_msg.csv");
-    if(file3) {
-        file3 << "enter_time,";
-        for(std::map<std::string, predicate_fn_type>::iterator it = predicate_map.begin(); it != predicate_map.end(); it++) {
-            file3 << it->first << ",";
-        }
-        file3 << "who_is_max";
-        file3 << "\n";
-        for(int i = 0; i < message_sender->msg_idx; i++) {
-            file3 << message_sender->enter_queue_time_keeper[i] << "," << message_sender->sf_arrive_time_keeper[i * 6] << "," << message_sender->sf_arrive_time_keeper[i * 6 + 1] << "," << message_sender->sf_arrive_time_keeper[i * 6 + 2] << "," << message_sender->sf_arrive_time_keeper[i * 6 + 3] << "," << message_sender->sf_arrive_time_keeper[i * 6 + 4] << "," << message_sender->sf_arrive_time_keeper[i * 6 + 5] << "," << message_sender->who_is_max[i] << "\n";
-        }
-    }
-    file3.close();
+    // std::ofstream file3("./all_sf_for_each_msg.csv");
+    // if(file3) {
+    //     file3 << "enter_time,";
+    //     for(std::map<std::string, predicate_fn_type>::iterator it = predicate_map.begin(); it != predicate_map.end(); it++) {
+    //         file3 << it->first << ",";
+    //     }
+    //     file3 << "who_is_max";
+    //     file3 << "\n";
+    //     for(int i = 0; i < message_sender->msg_idx; i++) {
+    //         file3 << message_sender->enter_queue_time_keeper[i] << "," << message_sender->sf_arrive_time_keeper[i * 6] << "," << message_sender->sf_arrive_time_keeper[i * 6 + 1] << "," << message_sender->sf_arrive_time_keeper[i * 6 + 2] << "," << message_sender->sf_arrive_time_keeper[i * 6 + 3] << "," << message_sender->sf_arrive_time_keeper[i * 6 + 4] << "," << message_sender->sf_arrive_time_keeper[i * 6 + 5] << "," << message_sender->who_is_max[i] << "\n";
+    //     }
+    // }
+    // file3.close();
 
     /**record ack to calculate the utility of the bandwidth**/
     // std::ofstream file4("./ack_keeper_bandwidth.csv");

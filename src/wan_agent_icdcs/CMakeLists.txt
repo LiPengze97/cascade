@@ -22,3 +22,11 @@ target_include_directories(cascade_wan_sender PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
 )
 target_link_libraries(cascade_wan_sender_icdcs cascade dl predicate_generator)
+
+add_executable(test test.cpp)
+target_include_directories(test PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+)
+target_link_libraries(test cascade predicate_generator)

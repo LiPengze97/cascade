@@ -382,6 +382,8 @@ int do_client(int argc, char** args) {
         std::cout << "TODO:" << test_type << " not supported yet." << std::endl;
         return 0;
     }
+
+    dbg_default_debug("hi!");
     // std::ofstream file("./message_index.csv");
     // if(!file) {
     //     exit(-1);
@@ -390,11 +392,16 @@ int do_client(int argc, char** args) {
     /** 1 - create external client group*/
     derecho::ExternalGroup<WPCSU, WPCSS> group;
 
+    dbg_default_debug(">>>");
+
     uint64_t msg_size = derecho::getConfUInt64(CONF_SUBGROUP_DEFAULT_MAX_PAYLOAD_SIZE);
     uint32_t my_node_id = derecho::getConfUInt32(CONF_DERECHO_LOCAL_ID);
 
     /** 2 - test both latency and bandwidth */
     if(is_wpcss) {
+
+        dbg_default_debug("start testing latency and bandwidth!");
+
         if(derecho::hasCustomizedConfKey("SUBGROUP/WPCSS/max_payload_size")) {
             msg_size = derecho::getConfUInt64("SUBGROUP/WPCSS/max_payload_size") - 128;
         }
@@ -403,11 +410,14 @@ int do_client(int argc, char** args) {
         struct client_states cs(max_pending_ops, num_messages, msg_size, target_sf);
         char* bbuf = (char*)malloc(msg_size);
         bzero(bbuf, msg_size);
-
+        
         ExternalClientCaller<WPCSS, std::remove_reference<decltype(group)>::type>& wpcss_ec = group.get_subgroup_caller<WPCSS>();
         auto members = group.template get_shard_members<WPCSS>(0, 0);
         node_id_t server_id = members[my_node_id % members.size()];
-        std::ifstream inFile("/root/lpz/icdcs_cascade/cascade/trace_09_20.csv", std::ios::in);
+
+        cout << my_node_id << ' ' << members.size() << ' ' << server_id << endl;
+
+        std::ifstream inFile("/home/zlqm/Desktop/cascade/trace_09_20.csv", std::ios::in);
         std::string lineStr;
         getline(inFile, lineStr);
         uint64_t message_index = 0;
@@ -544,6 +554,8 @@ int do_client(int argc, char** args) {
         // cs.print_statistics();
     }
 
+    dbg_default_debug("leaving do_client");
+
     return 0;
 }
 
@@ -573,6 +585,8 @@ int main(int argc, char** argv) {
     /** initialize the parameters */
     derecho::Conf::initialize(argc, argv);
 
+    dbg_default_debug("initialization done!");
+
     /** check parameters */
     int first_arg_idx = index_of_first_arg(argc, argv);
     if(first_arg_idx >= argc) {
@@ -588,6 +602,7 @@ int main(int argc, char** argv) {
             print_help(std::cerr, argv[0]);
             return -1;
         }
+        dbg_default_debug("entering do_client");
         // passing <test_type> <num_messages> <is_wpcss> [tx_deptn]
         return do_client(argc - (first_arg_idx + 1), &argv[first_arg_idx + 1]);
     } else {
