@@ -3,6 +3,7 @@
 #include <chrono>
 #include <derecho/core/derecho.hpp>
 #include <derecho/utils/logger.hpp>
+#include <derecho/mutils-serialization/SerializationSupport.hpp>
 #include <fstream>
 #include <iostream>
 #include <list>
@@ -20,6 +21,7 @@
 
 using namespace derecho::cascade;
 using namespace std;
+using namespace mutils;
 using derecho::ExternalClientCaller;
 
 using WPCSU = WANPersistentCascadeStore<uint64_t, ObjectWithUInt64Key, &ObjectWithUInt64Key::IK, &ObjectWithUInt64Key::IV, ST_FILE>;
@@ -55,16 +57,23 @@ int do_client() {
     char buf[derecho::getConfUInt64(CONF_SUBGROUP_DEFAULT_MAX_PAYLOAD_SIZE)];
     string key;
 
+    DeserializationManager DSM = {{}};
+
     string read_request_buf = "READ_REQUEST";
     while(cin >> op) {
         if (op == "read") {
             cin >> key;
             ObjectWithStringKey o(key, Blob(read_request_buf.c_str(), read_request_buf.size()));
             auto res = wpcss_ec.p2p_send<RPC_NAME(read)>(server_id, o, key);
-            wan_agent::Blob obj = res.get().get(server_id);
-            cerr << "hi" << endl;
-            cerr << obj.size << endl;
-            cerr << obj.bytes << endl;
+            wan_agent::Blob obj_bytes = res.get().get(server_id);
+            cerr << "message size = " << obj_bytes.size << endl;
+            if (strcmp(obj_bytes.bytes, "NO_SUCH_KEY") == 0) {
+                cerr << obj_bytes.bytes << endl;
+            }
+            else {
+                auto obj = from_bytes<ObjectWithStringKey>(&DSM, obj_bytes.bytes);
+                cerr << (*obj) << endl;
+            }
         } else if (op == "write") {
             cin >> key >> buf;
             ObjectWithStringKey o(key, Blob(buf, strlen(buf)));

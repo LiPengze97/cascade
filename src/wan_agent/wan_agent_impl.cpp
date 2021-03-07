@@ -446,7 +446,9 @@ void MessageSender::recv_ack_loop() {
                 }
                 message_counters[res.site_id]++;
                 uint64_t pre_cal_st_time = get_time_us();
+                std::cout << "entering predicate calculation" << std::endl;
                 predicate_calculation();
+                std::cout << "leaving predicate calculation" << std::endl;
                 auto obj_size = res.payload_size;
                 if (obj_size) {
                     std::cout << "receiving object for read request " << res.seq << " from " << res.site_id << std::endl;
