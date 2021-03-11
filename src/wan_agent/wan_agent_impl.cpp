@@ -27,111 +27,6 @@ inline uint64_t get_time_us() {
 
 namespace wan_agent {
 
-Blob::Blob(const char* const b, const decltype(size) s) :
-    bytes(nullptr), size(0), is_temporary(false) {
-    if(s > 0) {
-        bytes = new char[s];
-        if (b != nullptr) {
-            memcpy(bytes, b, s);
-        } else {
-            bzero(bytes, s);
-        }
-        size = s;
-    }
-}
-
-Blob::Blob(char* b, const decltype(size) s, bool temporary) :
-    bytes(b), size(s), is_temporary(temporary) {
-    if ( (size>0) && (is_temporary==false)) {
-        bytes = new char[s];
-        if (b != nullptr) {
-            memcpy(bytes, b, s);
-        } else {
-            bzero(bytes, s);
-        }
-    }
-    // exclude illegal argument combination like (0x982374,0,false)
-    if (size == 0) {
-        bytes = nullptr;
-    }
-}
-
-Blob::Blob(const Blob& other) :
-    bytes(nullptr), size(0) {
-    if(other.size > 0) {
-        bytes = new char[other.size];
-        memcpy(bytes, other.bytes, other.size);
-        size = other.size;
-    }
-}
-
-Blob::Blob(Blob&& other) : 
-    bytes(other.bytes), size(other.size) {
-    other.bytes = nullptr;
-    other.size = 0;
-}
-
-Blob::Blob() : bytes(nullptr), size(0) {}
-
-Blob::~Blob() {
-    if(bytes && !is_temporary) {
-        delete [] bytes;
-    }
-}
-
-Blob& Blob::operator=(Blob&& other) {
-    char* swp_bytes = other.bytes;
-    std::size_t swp_size = other.size;
-    other.bytes = bytes;
-    other.size = size;
-    bytes = swp_bytes;
-    size = swp_size;
-    return *this;
-}
-
-Blob& Blob::operator=(const Blob& other) {
-    if(bytes != nullptr) {
-        delete bytes;
-    }
-    size = other.size;
-    if(size > 0) {
-        bytes = new char[size];
-        memcpy(bytes, other.bytes, size);
-    } else {
-        bytes = nullptr;
-    }
-    return *this;
-}
-
-std::size_t Blob::to_bytes(char* v) const {
-    ((std::size_t*)(v))[0] = size;
-    if(size > 0) {
-        memcpy(v + sizeof(size), bytes, size);
-    }
-    return size + sizeof(size);
-}
-
-std::size_t Blob::bytes_size() const {
-    return size + sizeof(size);
-}
-
-void Blob::post_object(const std::function<void(char const* const, std::size_t)>& f) const {
-    f((char*)&size, sizeof(size));
-    f(bytes, size);
-}
-
-mutils::context_ptr<Blob> Blob::from_bytes_noalloc(mutils::DeserializationManager* ctx, const char* const v) {
-    return mutils::context_ptr<Blob>{new Blob(const_cast<char*>(v) + sizeof(std::size_t), ((std::size_t*)(v))[0], true)};
-}
-
-mutils::context_ptr<Blob> Blob::from_bytes_noalloc_const(mutils::DeserializationManager* ctx, const char* const v) {
-    return mutils::context_ptr<Blob>{new Blob(const_cast<char*>(v) + sizeof(std::size_t), ((std::size_t*)(v))[0], true)};
-}
-
-std::unique_ptr<Blob> Blob::from_bytes(mutils::DeserializationManager*, const char* const v) {
-    return std::make_unique<Blob>(v + sizeof(std::size_t), ((std::size_t*)(v))[0]);
-}
-
 void WanAgent::load_config() noexcept(false) {
     log_enter_func();
     // Check if all mandatory keys are included.
@@ -356,6 +251,7 @@ MessageSender::MessageSender(const site_id_t& local_site_id,
         : local_site_id(local_site_id),
           n_slots(n_slots),  // TODO: useless after using linked list
           last_all_sent_seqno(static_cast<uint64_t>(-1)),
+          R_last_all_sent_seqno(static_cast<uint64_t>(-1)),
           message_counters(message_counters),
           report_new_ack(report_new_ack),
           thread_shutdown(false) {
@@ -372,16 +268,29 @@ MessageSender::MessageSender(const site_id_t& local_site_id,
     if(epoll_fd_recv_ack == -1)
         throw std::runtime_error("failed to create epoll fd");
 
+    epoll_fd_read_msg = epoll_create1(0);
+    if (epoll_fd_read_msg == -1)
+        throw std::runtime_error("failed to creat epoll fd");
+
+    epoll_fd_recv_read_ack = epoll_create1(0);
+    if (epoll_fd_recv_read_ack == -1)
+        throw std::runtime_error("failed to create epoll fd");
+
     for(const auto& [site_id, ip_port] : server_sites_ip_addrs_and_ports) {
         if(site_id != local_site_id) {
             sockaddr_in serv_addr;
             int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-            if(fd < 0)
+            int R_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+            if(fd < 0 || R_fd < 0)
                 throw std::runtime_error("MessageSender failed to create socket.");
             int flag = 1;
             int ret = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
-
             if(ret == -1) {
+                fprintf(stderr, "ERROR on setsockopt: %s\n", strerror(errno));
+                exit(-1);
+            }
+            ret = setsockopt(R_fd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+            if (ret == -1) {
                 fprintf(stderr, "ERROR on setsockopt: %s\n", strerror(errno));
                 exit(-1);
             }
@@ -391,49 +300,56 @@ MessageSender::MessageSender(const site_id_t& local_site_id,
 
             inet_pton(AF_INET, ip_port.first.c_str(), &serv_addr.sin_addr);
             if(connect(fd, (sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-                // log_debug("ERROR on connecting to socket: {}", strerror(errno));
                 throw std::runtime_error("MessageSender failed to connect socket");
             }
+            if (connect(R_fd, (sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+                throw std::runtime_error("MessageSender failed to connect socket");
+            }
+            std::cout << "new fd pair " << site_id << ' ' << fd << ' ' << R_fd << std::endl;
             add_epoll(epoll_fd_send_msg, EPOLLOUT, fd);
             add_epoll(epoll_fd_recv_ack, EPOLLIN, fd);
+            add_epoll(epoll_fd_read_msg, EPOLLOUT, R_fd);
+            add_epoll(epoll_fd_recv_read_ack, EPOLLIN, R_fd);
             sockfd_to_server_site_id_map[fd] = site_id;
+            R_sockfd_to_server_site_id_map[R_fd] = site_id;
             last_sent_seqno.emplace(site_id, static_cast<uint64_t>(-1));
+            R_last_sent_seqno.emplace(site_id, static_cast<uint64_t>(-1));
         }
-        // sockets.emplace(node_id, fd);
     }
+
+    nServer = message_counters.size();
+
     log_exit_func();
 }
 
-void MessageSender::update_read_seq(const uint64_t seq, const persistent::version_t version, Blob&& obj) {
+void MessageSender::check_read_tmp_store(const uint64_t seq, const persistent::version_t version, Blob&& obj) {
     std::pair<persistent::version_t, Blob>& obj_in_store = read_object_store[seq];
-    if (version >= obj_in_store.first || obj_in_store.second.size == 0) { //TODO: fix the bug here
+    if (version >= obj_in_store.first || obj_in_store.second.size == 0) {
         obj_in_store.first = version;
         obj_in_store.second = obj;
     }
-    //maybe do this in another thread ?
-    auto cur_sf = stability_frontier;
-    read_promise_lock.lock();
-    std::cout << "current sf = " << cur_sf << std::endl;
-    std::cout << "prev object store size = " << read_object_store.size() << std::endl;
-    // note that cur_sf = message seq number + 1
-    for (auto iter = read_promise_store.begin(); iter->first < cur_sf && iter != read_promise_store.end(); ) {
-        std::cout << "set value for promise of request " << iter->first << " object size = " << read_object_store[iter->first].second.size << std::endl;
-        iter->second.set_value(read_object_store[iter->first]);
-        read_object_store.erase(read_object_store.find(iter->first)); //delete the temporary object store
-        iter = read_promise_store.erase(iter);
+    read_recv_cnt[seq]++;
+    if (read_recv_cnt[seq] == nServer) {
+        read_promise_lock.lock();
+        auto iter = read_promise_store.find(seq);
+        iter->second.set_value(std::move(read_object_store[seq]));
+        read_object_store.erase(read_object_store.find(seq));
+        read_recv_cnt.erase(read_recv_cnt.find(seq));
+        read_promise_store.erase(iter);
+        read_promise_lock.unlock();
     }
-    std::cout << "current object store size = " << read_object_store.size() << std::endl;
-    read_promise_lock.unlock();
 }
 
 void MessageSender::recv_ack_loop() {
     log_enter_func();
+    auto tid = pthread_self();
+    std::cout << "recv_ack_loop start, tid = " << tid << std::endl;
     struct epoll_event events[EPOLL_MAXEVENTS];
     while(!thread_shutdown.load()) {
-        std::cout << "in recv_ack_loop, thread_shutdown.load() is " << thread_shutdown.load() << std::endl;
         int n = epoll_wait(epoll_fd_recv_ack, events, EPOLL_MAXEVENTS, -1);
         for(int i = 0; i < n; i++) {
             if(events[i].events & EPOLLIN) {
+                std::cout << "recv_ack started to work" << std::endl;
                 // received ACK
                 Response res;
                 auto success = sock_read(events[i].data.fd, res);
@@ -446,22 +362,7 @@ void MessageSender::recv_ack_loop() {
                 }
                 message_counters[res.site_id]++;
                 uint64_t pre_cal_st_time = get_time_us();
-                std::cout << "entering predicate calculation" << std::endl;
                 predicate_calculation();
-                std::cout << "leaving predicate calculation" << std::endl;
-                auto obj_size = res.payload_size;
-                if (obj_size) {
-                    std::cout << "receiving object for read request " << res.seq << " from " << res.site_id << std::endl;
-                    persistent::version_t new_version;
-                    success = sock_read(events[i].data.fd, new_version);
-                    std::cout << "version = " << new_version << std::endl;
-                    char* obj_buf = (char*)malloc(obj_size);
-                    success &= sock_read(events[i].data.fd, obj_buf, obj_size);
-                    if (!success)
-                        throw std::runtime_error("failed receiving object for read request");
-                    std::cout << "obj_size = " << ' ' << obj_size << " obj = " << obj_buf << std::endl;
-                    update_read_seq(res.seq, new_version, std::move(Blob(std::move(obj_buf), obj_size)));
-                }
                 transfer_data_cost += (get_time_us() - pre_cal_st_time) / 1000000.0;
                 // if(res.seq == wait_target_sf) {
                 //     ack_keeper[res.site_id - 1000] = get_time_us();
@@ -469,7 +370,41 @@ void MessageSender::recv_ack_loop() {
             }
         }
     }
-    // std::cout << "in recv_ack_loop, thread_shutdown.load() is " << thread_shutdown.load() << std::endl;
+    log_exit_func();
+}
+
+void MessageSender::recv_read_ack_loop() {
+    log_enter_func();
+    auto tid = pthread_self();
+    std::cout << "recv_read_ack_loop start, tid = " << tid << std::endl;
+    struct epoll_event events[EPOLL_MAXEVENTS];
+    while(!thread_shutdown.load()) {
+        int n = epoll_wait(epoll_fd_recv_read_ack, events, EPOLL_MAXEVENTS, -1);
+        for(int i = 0; i < n; i++) {
+            if(events[i].events & EPOLLIN) {
+                // received ACK
+                Response res;
+                auto success = sock_read(events[i].data.fd, res);
+                if (!success) {
+                    throw std::runtime_error("failed receiving ACK message");
+                }
+                std::cout << "received read ACK from " << res.site_id << " for msg " << res.seq << std::endl;
+                auto obj_size = res.payload_size;
+                std::cout << "obj_size = " << obj_size << std::endl;
+                if (obj_size) {
+                    persistent::version_t new_version;
+                    success = sock_read(events[i].data.fd, new_version);
+                    char* obj_buf = (char*)malloc(obj_size);
+                    success &= sock_read(events[i].data.fd, obj_buf, obj_size);
+                    if (!success)
+                        throw std::runtime_error("failed receiving object for read request");
+                    std::cout << "version = " << new_version << ' ' << "obj_size = " << obj_size << std::endl;
+                    check_read_tmp_store(res.seq, new_version, std::move(Blob(std::move(obj_buf), obj_size)));
+                }
+            }
+        }
+    }
+
     log_exit_func();
 }
 
@@ -632,23 +567,23 @@ uint64_t MessageSender::enqueue(const uint32_t requestType, const char* payload,
     }
     tmp->message_type = requestType;
     tmp->message_key = key;
-    tmp->global_seq = global_seq_ctr++;
+    tmp->global_seq = new_send_seq();
 
     buffer_list.push_back(*tmp);
     enter_queue_time_keeper[msg_idx++] = get_time_us();
     size_mutex.unlock();
     not_empty.notify_one();
-    return global_seq_ctr;
+    return tmp->global_seq;
 }
 
 read_future_t MessageSender::read_enqueue(const std::string& key) {
-    size_mutex.lock();
+    read_size_mutex.lock();
     LinkedBufferNode* tmp = new LinkedBufferNode();
     tmp->message_body = nullptr;
     tmp->message_size = 0;
     tmp->message_type = 0;
     tmp->message_key = key;
-    tmp->global_seq = global_seq_ctr++;
+    tmp->global_seq = new_read_seq(); //separate read sequence number from send sequence number
 
     //set the read promise store before push_back
     read_promise_lock.lock();
@@ -657,15 +592,17 @@ read_future_t MessageSender::read_enqueue(const std::string& key) {
     read_promise_store.emplace(tmp->global_seq, std::move(new_promise));
     read_promise_lock.unlock();
 
-    buffer_list.push_back(*tmp);
-    enter_queue_time_keeper[msg_idx++] = get_time_us();
-    size_mutex.unlock();
-    not_empty.notify_one();
+    read_buffer_list.push_back(*tmp);
+    // enter_queue_time_keeper[msg_idx++] = get_time_us();
+    read_size_mutex.unlock();
+    read_not_empty.notify_one();
     return std::move(ret_future);
 }
 
 void MessageSender::send_msg_loop() {
     log_enter_func();
+    auto tid = pthread_self();
+    std::cout << "send_msg_loop start, tid = " << tid << std::endl;
     struct epoll_event events[EPOLL_MAXEVENTS];
     while(!thread_shutdown.load()) {
         // std::cout << "in send_msg_loop, thread_shutdown.load() is " << thread_shutdown.load() << std::endl;
@@ -692,6 +629,7 @@ void MessageSender::send_msg_loop() {
                 // decode paylaod_size in the beginning
                 // memcpy(&payload_size, buf[pos].get(), sizeof(size_t));
                 auto curr_seqno = last_sent_seqno[site_id] + 1;
+                std::cout << "key = " << key << std::endl;
                 if (curr_seqno != node.global_seq) {
                     throw std::runtime_error("Something wrong with the seq number");
                 }
@@ -701,7 +639,7 @@ void MessageSender::send_msg_loop() {
                 sock_write(events[i].data.fd, RequestHeader{requestType, key.size(), curr_seqno, local_site_id, payload_size});
                 if (key.size())
                     sock_write(events[i].data.fd, key.c_str(), key.size());
-                if (payload_size) 
+                if (payload_size)
                     sock_write(events[i].data.fd, node.message_body, payload_size);
                 leave_queue_time_keeper[curr_seqno * 7 + site_id - 1000] = get_time_us();
                 // buffer_size[curr_seqno] = size;
@@ -731,6 +669,58 @@ void MessageSender::send_msg_loop() {
             size_mutex.unlock();
             // list_lock.unlock();
             last_all_sent_seqno++;
+        }
+        lock.unlock();
+    }
+
+    log_exit_func();
+}
+
+void MessageSender::read_msg_loop() {
+    log_enter_func();
+    auto tid = pthread_self();
+    std::cout << "read_msg_loop start, tid = " << tid << std::endl;
+    struct epoll_event events[EPOLL_MAXEVENTS];
+    while(!thread_shutdown.load()) {
+        std::unique_lock<std::mutex> lock(read_mutex);
+        read_not_empty.wait(lock, [this]() { return read_buffer_list.size() > 0; });
+        int n = epoll_wait(epoll_fd_read_msg, events, EPOLL_MAXEVENTS, -1);
+        for(int i = 0; i < n; i++) {
+            if(events[i].events & EPOLLOUT) {
+                site_id_t site_id = R_sockfd_to_server_site_id_map[events[i].data.fd];
+                auto offset = R_last_sent_seqno[site_id] - R_last_all_sent_seqno;
+                if(offset == read_buffer_list.size()) {
+                    continue;
+                }
+                auto node = read_buffer_list.front();
+                size_t payload_size = node.message_size;
+                auto requestType = node.message_type;
+                auto key = node.message_key;
+                auto curr_seqno = R_last_sent_seqno[site_id] + 1;
+                if (curr_seqno != node.global_seq) {
+                    throw std::runtime_error("Something wrong with the seq number");
+                }
+                sock_write(events[i].data.fd, RequestHeader{requestType, key.size(), curr_seqno, local_site_id, payload_size});
+                if (key.size())
+                    sock_write(events[i].data.fd, key.c_str(), key.size());
+                if (payload_size) {
+                    throw std::runtime_error("Something went wrong with read requests");
+                }
+                R_last_sent_seqno[site_id] = curr_seqno;
+            }
+        }
+
+        auto it = std::min_element(R_last_sent_seqno.begin(), R_last_sent_seqno.end(),
+                                   [](const auto& p1, const auto& p2) { 
+                                           if (p1.second == static_cast<uint64_t>(-1)) {return true;} 
+                                           else {return p1.second < p2.second;} });
+
+        if(it->second > R_last_all_sent_seqno || (R_last_all_sent_seqno == static_cast<uint64_t>(-1) && it->second == 0)) {
+            assert(it->second - R_last_all_sent_seqno == 1);
+            read_size_mutex.lock();
+            read_buffer_list.pop_front();
+            read_size_mutex.unlock();
+            R_last_all_sent_seqno++;
         }
         lock.unlock();
     }
@@ -768,6 +758,8 @@ WanAgentSender::WanAgentSender(const nlohmann::json& wan_group_config,
     generate_predicate();
     recv_ack_thread = std::thread(&MessageSender::recv_ack_loop, message_sender.get());
     send_msg_thread = std::thread(&MessageSender::send_msg_loop, message_sender.get());
+    recv_read_ack_thread = std::thread(&MessageSender::recv_read_ack_loop, message_sender.get());
+    read_msg_thread = std::thread(&MessageSender::read_msg_loop, message_sender.get());
 
     message_sender->predicate = predicate;
 }

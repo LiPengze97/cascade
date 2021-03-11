@@ -18,6 +18,7 @@
 #include <thread>
 #include <utility>
 #include <wan_agent/wan_agent_type_definitions.hpp>
+#include <wan_agent/wan_agent_object.hpp>
 // #include <wan_agent/wan_agent_utils.hpp>
 #include "pre_driver.hpp"
 #include "predicate_generator.hpp"
@@ -58,47 +59,6 @@ using PredicateLambda = std::function<void(const std::map<site_id_t, uint64_t>&)
 
 using ReportACKFunc = std::function<void()>;
 using NotifierFunc = std::function<void()>;
-
-class Blob : public mutils::ByteRepresentable {
-public:
-    char* bytes;
-    std::size_t size;
-    bool is_temporary;
-
-    Blob(const char* const b, const decltype(size) s);
-
-    Blob(char* b, const decltype(size) s, bool temporary);
-
-    Blob(const Blob& other);
-
-    Blob(Blob&& other);
-
-    Blob();
-
-    virtual ~Blob();
-
-    Blob& operator=(Blob&& other);
-
-    Blob& operator=(const Blob& other);
-
-    std::size_t to_bytes(char* v) const;
-
-    std::size_t bytes_size() const;
-
-    void post_object(const std::function<void(char const* const, std::size_t)>& f) const;
-
-    void ensure_registered(mutils::DeserializationManager&) {}
-
-    static std::unique_ptr<Blob> from_bytes(mutils::DeserializationManager*, const char* const v);
-
-    mutils::context_ptr<Blob> from_bytes_noalloc(
-        mutils::DeserializationManager* ctx,
-        const char* const v);
-
-    mutils::context_ptr<Blob> from_bytes_noalloc_const(
-        mutils::DeserializationManager* ctx,
-        const char* const v);
-};
 
 using read_future_t = std::future<std::pair<persistent::version_t, Blob>>;
 using read_promise_t = std::promise<std::pair<persistent::version_t, Blob>>;
@@ -284,10 +244,13 @@ struct LinkedBufferNode {
 class MessageSender final {
 private:
     std::list<LinkedBufferNode> buffer_list;
+    std::list<LinkedBufferNode> read_buffer_list;
     const site_id_t local_site_id;
     // std::map<site_id_t, int> sockets;
     int epoll_fd_send_msg;
     int epoll_fd_recv_ack;
+    int epoll_fd_read_msg;
+    int epoll_fd_recv_read_ack;
 
     int non_gccjit_calculation(int* seq_vec);
     std::mutex stability_frontier_arrive_mutex;
@@ -307,18 +270,26 @@ private:
     std::condition_variable not_empty;
     std::mutex size_mutex;
     // std::condition_variable not_full;
+    std::mutex read_mutex;
+    std::condition_variable read_not_empty;
+    std::mutex read_size_mutex;
 
     uint64_t last_all_sent_seqno;
     std::map<site_id_t, uint64_t> last_sent_seqno;
+    uint64_t R_last_all_sent_seqno;
+    std::map<site_id_t, uint64_t> R_last_sent_seqno;
     std::map<int, site_id_t> sockfd_to_server_site_id_map;
+    std::map<int, site_id_t> R_sockfd_to_server_site_id_map;
 
-    std::map<site_id_t, std::atomic<uint64_t>>& message_counters;
+    std::map<site_id_t, std::atomic<uint64_t>>& message_counters; // only for "SEND" request
     const ReportACKFunc report_new_ack;
 
     std::atomic<bool> thread_shutdown;
     const int N_MSG = 520000;
 
-    std::map<uint64_t, std::pair<persistent::version_t, char*> > pending_responces;
+    int nServer;
+    uint64_t global_send_seq_ctr = 0;
+    uint64_t global_read_seq_ctr = 0;
 
 public:
     std::vector<pre_operation> operations;
@@ -353,26 +324,32 @@ public:
     double transfer_data_cost = 0;
     double get_size_cost = 0;
 
-    uint64_t global_seq_ctr = 0; //assign seq number upon enqueue
-
     std::mutex stability_frontier_set_mutex;
     std::condition_variable stability_frontier_set_cv;
 
     std::map<uint64_t, read_promise_t> read_promise_store;
     std::mutex read_promise_lock;
     std::map<uint64_t, std::pair<persistent::version_t, Blob> > read_object_store;
+    std::map<uint64_t, uint64_t> read_recv_cnt;
 
     MessageSender(const site_id_t& local_site_id,
                   const std::map<site_id_t, std::pair<ip_addr_t, uint16_t>>& server_sites_ip_addrs_and_ports,
                   const size_t& n_slots, const size_t& max_payload_size,
                   std::map<site_id_t, std::atomic<uint64_t>>& message_counters,
                   const ReportACKFunc& report_new_ack);
-
+    inline uint64_t new_send_seq() {
+        return global_send_seq_ctr++;
+    }
+    inline uint64_t new_read_seq() {
+        return global_read_seq_ctr++;
+    }
     void recv_ack_loop();
-    void update_read_seq(const uint64_t seq, const persistent::version_t version, Blob&& obj);
+    void recv_read_ack_loop();
+    void check_read_tmp_store(const uint64_t seq, const persistent::version_t version, Blob&& obj);
     uint64_t enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const std::string& key);
     read_future_t read_enqueue(const std::string& key);
     void send_msg_loop();
+    void read_msg_loop();
     void predicate_calculation();
     void wait_stability_frontier_loop(int sf);
     void sf_time_checker_loop();
@@ -402,6 +379,8 @@ private:
     std::thread recv_ack_thread;
     std::thread send_msg_thread;
     std::thread wait_sf_thread;
+    std::thread recv_read_ack_thread;
+    std::thread read_msg_thread;
     uint64_t all_start_time;
     std::map<site_id_t, std::atomic<uint64_t>> message_counters;
     std::string predicate_experssion;

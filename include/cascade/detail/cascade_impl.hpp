@@ -834,13 +834,9 @@ std::tuple<persistent::version_t, uint64_t> WANPersistentCascadeStore<KT, VT, IK
 template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 wan_agent::Blob WANPersistentCascadeStore<KT, VT, IK, IV, ST>::read(const VT& value, const std::string& key) {
     debug_enter_func_with_args("value.key={}", value.key);
-    derecho::Replicated<WANPersistentCascadeStore>& subgroup_handle = group->template get_subgroup<WANPersistentCascadeStore>(this->subgroup_index);
-    auto results = subgroup_handle.template ordered_send<RPC_NAME(ordered_put)>(value);
-    auto& replies = results.get();
-    for(auto& reply_pair : replies) {
-        reply_pair.second.get();
-    }
 
+    derecho::Replicated<WANPersistentCascadeStore>& subgroup_handle = group->template get_subgroup<WANPersistentCascadeStore>(this->subgroup_index);
+    
     if(wan_sender_in_my_shard == static_cast<node_id_t>(-1)) {
         uint32_t shard_num = subgroup_handle.template get_shard_num();
         std::vector<std::vector<node_id_t>> subgroup_members = group->template get_subgroup_members<WANPersistentCascadeStore>(subgroup_index);
