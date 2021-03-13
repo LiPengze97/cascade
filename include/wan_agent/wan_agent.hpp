@@ -348,6 +348,7 @@ public:
     void check_read_tmp_store(const uint64_t seq, const persistent::version_t version, Blob&& obj);
     uint64_t enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const std::string& key);
     read_future_t read_enqueue(const std::string& key);
+    read_future_t seq_read_enqueue(const uint64_t seq);
     void send_msg_loop();
     void read_msg_loop();
     void predicate_calculation();
@@ -421,6 +422,9 @@ public:
     }
     read_future_t send_read_req(const std::string& key) {
         return std::move(this->message_sender->read_enqueue(key));
+    }
+    read_future_t send_seq_read_req(const uint64_t seq) {
+        return std::move(this->message_sender->seq_read_enqueue(seq));
     }
 
     void submit_predicate(std::string key, std::string predicate_str, bool inplace);

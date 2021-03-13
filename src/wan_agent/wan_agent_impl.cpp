@@ -393,8 +393,10 @@ void MessageSender::recv_read_ack_loop() {
                 std::cout << "obj_size = " << obj_size << std::endl;
                 if (obj_size) {
                     persistent::version_t new_version;
+                    std::cout << "receiving version" << std::endl;
                     success = sock_read(events[i].data.fd, new_version);
                     char* obj_buf = (char*)malloc(obj_size);
+                    std::cout << "receiving object" << std::endl;
                     success &= sock_read(events[i].data.fd, obj_buf, obj_size);
                     if (!success)
                         throw std::runtime_error("failed receiving object for read request");
@@ -594,6 +596,28 @@ read_future_t MessageSender::read_enqueue(const std::string& key) {
 
     read_buffer_list.push_back(*tmp);
     // enter_queue_time_keeper[msg_idx++] = get_time_us();
+    read_size_mutex.unlock();
+    read_not_empty.notify_one();
+    return std::move(ret_future);
+}
+
+read_future_t MessageSender::seq_read_enqueue(const uint64_t seq) {
+    read_size_mutex.lock();
+    LinkedBufferNode* tmp = new LinkedBufferNode();
+    tmp->message_body = nullptr;
+    tmp->message_size = 0;
+    tmp->message_type = 2;
+    tmp->message_key = std::to_string(seq);
+    tmp->global_seq = new_read_seq(); //separate read sequence number from send sequence number
+
+    //set the read promise store before push_back
+    read_promise_lock.lock();
+    read_promise_t new_promise;
+    read_future_t ret_future = new_promise.get_future();
+    read_promise_store.emplace(tmp->global_seq, std::move(new_promise));
+    read_promise_lock.unlock();
+
+    read_buffer_list.push_back(*tmp);
     read_size_mutex.unlock();
     read_not_empty.notify_one();
     return std::move(ret_future);

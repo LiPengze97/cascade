@@ -60,14 +60,14 @@ int do_client() {
     DeserializationManager DSM = {{}};
 
     string read_request_buf = "READ_REQUEST";
+    uint64_t seq;
     while(cin >> op) {
-        if (op == "read") {
-            cin >> key;
-            ObjectWithStringKey o(key, Blob(read_request_buf.c_str(), read_request_buf.size()));
-            auto res = wpcss_ec.p2p_send<RPC_NAME(read)>(server_id, o, key);
+        if (op == "seq_read") {
+            cin >> seq;
+            auto res = wpcss_ec.p2p_send<RPC_NAME(seq_read)>(server_id, seq);
             wan_agent::Blob obj_bytes = res.get().get(server_id);
             cerr << "message size = " << obj_bytes.size << endl;
-            if (strcmp(obj_bytes.bytes, "NO_SUCH_KEY") == 0) {
+            if (strcmp(obj_bytes.bytes, "SEQ_NOT_FOUND") == 0) {
                 cerr << obj_bytes.bytes << endl;
             }
             else {

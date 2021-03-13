@@ -856,6 +856,28 @@ wan_agent::Blob WANPersistentCascadeStore<KT, VT, IK, IV, ST>::read(const VT& va
 }
 
 template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
+wan_agent::Blob WANPersistentCascadeStore<KT, VT, IK, IV, ST>::seq_read(const uint64_t& seq) {
+    derecho::Replicated<WANPersistentCascadeStore>& subgroup_handle = group->template get_subgroup<WANPersistentCascadeStore>(this->subgroup_index);
+    
+    if(wan_sender_in_my_shard == static_cast<node_id_t>(-1)) {
+        uint32_t shard_num = subgroup_handle.template get_shard_num();
+        std::vector<std::vector<node_id_t>> subgroup_members = group->template get_subgroup_members<WANPersistentCascadeStore>(subgroup_index);
+        wan_sender_in_my_shard = subgroup_members.at(shard_num).at(0);
+        dbg_default_info("Did not set wan_sender_in_my_shard in view_upcall, broadcast it to be {}", wan_sender_in_my_shard);
+        subgroup_handle.template ordered_send<RPC_NAME(set_wan_sender_info)>(wan_sender_in_my_shard);
+    }
+
+    node_id_t my_id = getConfUInt32(CONF_DERECHO_LOCAL_ID);
+
+    if(wan_sender_in_my_shard == my_id) {
+        return std::move(do_wan_agent_seq_read(seq));
+    } else {
+        auto res = subgroup_handle.template p2p_send<RPC_NAME(do_wan_agent_seq_read)>(wan_sender_in_my_shard, seq);
+        return std::move(res.get().get(wan_sender_in_my_shard));
+    }
+}
+
+template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 uint64_t WANPersistentCascadeStore<KT, VT, IK, IV, ST>::write(const VT& value, const std::string& key) {
     debug_enter_func_with_args("value.key={}", value.key);
     derecho::Replicated<WANPersistentCascadeStore>& subgroup_handle = group->template get_subgroup<WANPersistentCascadeStore>(this->subgroup_index);
@@ -970,6 +992,16 @@ wan_agent::Blob WANPersistentCascadeStore<KT, VT, IK, IV, ST>::do_wan_agent_read
         init_wan_config();
     }
     auto read_future = std::move(wan_agent_sender->send_read_req(key));
+
+    return std::move(read_future.get().second);
+}
+
+template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
+wan_agent::Blob WANPersistentCascadeStore<KT, VT, IK, IV, ST>::do_wan_agent_seq_read(const uint64_t seq) {
+    if(!wan_agent_sender) {
+        init_wan_config();
+    }
+    auto read_future = std::move(wan_agent_sender->send_seq_read_req(seq));
 
     return std::move(read_future.get().second);
 }
