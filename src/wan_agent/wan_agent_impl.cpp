@@ -324,9 +324,11 @@ MessageSender::MessageSender(const site_id_t& local_site_id,
 
 void MessageSender::check_read_tmp_store(const uint64_t seq, const persistent::version_t version, Blob&& obj) {
     std::pair<persistent::version_t, Blob>& obj_in_store = read_object_store[seq];
-    if (version >= obj_in_store.first || obj_in_store.second.size == 0) {
+    if (obj_in_store.second.size == 0) {
         obj_in_store.first = version;
         obj_in_store.second = obj;
+    } else if (version != obj_in_store.first) {
+        throw std::runtime_error("Something wrong with versions");
     }
     read_recv_cnt[seq]++;
     if (read_recv_cnt[seq] == nServer) {
@@ -555,7 +557,7 @@ void MessageSender::wait_stability_frontier_loop(int sf) {
     stability_frontier_set_cv.notify_one();
 }
 
-uint64_t MessageSender::enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const std::string& key) {
+uint64_t MessageSender::enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const uint64_t& version) {
         // std::unique_lock<std::mutex> lock(mutex);
     size_mutex.lock();
     LinkedBufferNode* tmp = new LinkedBufferNode();
@@ -568,7 +570,7 @@ uint64_t MessageSender::enqueue(const uint32_t requestType, const char* payload,
         memcpy(tmp->message_body, payload, payload_size);
     }
     tmp->message_type = requestType;
-    tmp->message_key = key;
+    tmp->message_version = version;
     tmp->global_seq = new_send_seq();
 
     buffer_list.push_back(*tmp);
@@ -578,13 +580,13 @@ uint64_t MessageSender::enqueue(const uint32_t requestType, const char* payload,
     return tmp->global_seq;
 }
 
-read_future_t MessageSender::read_enqueue(const std::string& key) {
+read_future_t MessageSender::read_enqueue(const uint64_t& version) {
     read_size_mutex.lock();
     LinkedBufferNode* tmp = new LinkedBufferNode();
     tmp->message_body = nullptr;
     tmp->message_size = 0;
     tmp->message_type = 0;
-    tmp->message_key = key;
+    tmp->message_version = version;
     tmp->global_seq = new_read_seq(); //separate read sequence number from send sequence number
 
     //set the read promise store before push_back
@@ -596,28 +598,6 @@ read_future_t MessageSender::read_enqueue(const std::string& key) {
 
     read_buffer_list.push_back(*tmp);
     // enter_queue_time_keeper[msg_idx++] = get_time_us();
-    read_size_mutex.unlock();
-    read_not_empty.notify_one();
-    return std::move(ret_future);
-}
-
-read_future_t MessageSender::seq_read_enqueue(const uint64_t seq) {
-    read_size_mutex.lock();
-    LinkedBufferNode* tmp = new LinkedBufferNode();
-    tmp->message_body = nullptr;
-    tmp->message_size = 0;
-    tmp->message_type = 2;
-    tmp->message_key = std::to_string(seq);
-    tmp->global_seq = new_read_seq(); //separate read sequence number from send sequence number
-
-    //set the read promise store before push_back
-    read_promise_lock.lock();
-    read_promise_t new_promise;
-    read_future_t ret_future = new_promise.get_future();
-    read_promise_store.emplace(tmp->global_seq, std::move(new_promise));
-    read_promise_lock.unlock();
-
-    read_buffer_list.push_back(*tmp);
     read_size_mutex.unlock();
     read_not_empty.notify_one();
     return std::move(ret_future);
@@ -649,20 +629,18 @@ void MessageSender::send_msg_loop() {
                 auto node = buffer_list.front();
                 size_t payload_size = node.message_size;
                 auto requestType = node.message_type;
-                auto key = node.message_key;
+                auto version = node.message_version;
                 // decode paylaod_size in the beginning
                 // memcpy(&payload_size, buf[pos].get(), sizeof(size_t));
                 auto curr_seqno = last_sent_seqno[site_id] + 1;
-                std::cout << "key = " << key << std::endl;
                 if (curr_seqno != node.global_seq) {
                     throw std::runtime_error("Something wrong with the seq number");
                 }
                 // log_info("sending msg {} to site {}.", curr_seqno, site_id);
                 // send over socket
                 // time_keeper[curr_seqno*4+site_id-1] = now_us();
-                sock_write(events[i].data.fd, RequestHeader{requestType, key.size(), curr_seqno, local_site_id, payload_size});
-                if (key.size())
-                    sock_write(events[i].data.fd, key.c_str(), key.size());
+                sock_write(events[i].data.fd, RequestHeader{requestType, version, curr_seqno, local_site_id, payload_size});
+                sock_write(events[i].data.fd, version);
                 if (payload_size)
                     sock_write(events[i].data.fd, node.message_body, payload_size);
                 leave_queue_time_keeper[curr_seqno * 7 + site_id - 1000] = get_time_us();
@@ -719,14 +697,13 @@ void MessageSender::read_msg_loop() {
                 auto node = read_buffer_list.front();
                 size_t payload_size = node.message_size;
                 auto requestType = node.message_type;
-                auto key = node.message_key;
+                auto version = node.message_version;
                 auto curr_seqno = R_last_sent_seqno[site_id] + 1;
                 if (curr_seqno != node.global_seq) {
                     throw std::runtime_error("Something wrong with the seq number");
                 }
-                sock_write(events[i].data.fd, RequestHeader{requestType, key.size(), curr_seqno, local_site_id, payload_size});
-                if (key.size())
-                    sock_write(events[i].data.fd, key.c_str(), key.size());
+                sock_write(events[i].data.fd, RequestHeader{requestType, version, curr_seqno, local_site_id, payload_size});
+                sock_write(events[i].data.fd, version);
                 if (payload_size) {
                     throw std::runtime_error("Something went wrong with read requests");
                 }

@@ -447,6 +447,8 @@ public:
 
     REGISTER_RPC_FUNCTIONS(WANPersistentCascadeStore,
                            put,
+                           read,
+                           write,
                            remove,
                            get,
                            get_by_time,
@@ -463,17 +465,16 @@ public:
                            change_predicate,
                            do_wan_agent_send,
                            do_wan_agent_read,
-                           do_wan_agent_seq_read,
                            do_wan_agent_write,
                            set_stability_frontier,
                            set_wan_sender_info,
                            get_stability_frontier_arrive_time,
                            start_wanagent,
-                           get_stability_frontier,
-                           seq_read,
-                           write);
+                           get_stability_frontier);
     virtual std::tuple<persistent::version_t, uint64_t> put(
             const VT& value) override;
+    wan_agent::Blob read(const uint64_t& version);
+    uint64_t write(const VT& value, const uint64_t& version);
     virtual std::tuple<persistent::version_t, uint64_t> remove(
             const KT& key) override;
     virtual const VT get(const KT& key,
@@ -505,17 +506,13 @@ public:
 
 public:
     // WanAgent stuff
-    wan_agent::Blob read(const VT& value, const std::string& key);
-    wan_agent::Blob seq_read(const uint64_t& seq);
-    uint64_t write(const VT& value, const std::string& key);
     void submit_predicate(const std::string& key,
                           const std::string& predicate_str, const bool inplace);
     void change_predicate(const std::string& key);
 
     void do_wan_agent_send(const VT& value);
-    wan_agent::Blob do_wan_agent_read(const std::string& key);
-    wan_agent::Blob do_wan_agent_seq_read(const uint64_t seq);
-    uint64_t do_wan_agent_write(const VT& value, const std::string& key);
+    wan_agent::Blob do_wan_agent_read(const uint64_t& version);
+    uint64_t do_wan_agent_write(const VT& value, const uint64_t& version);
     void set_wan_sender_info(const node_id_t sender_id);
 
     void set_stability_frontier(int sf);

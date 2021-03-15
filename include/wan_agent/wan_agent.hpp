@@ -74,7 +74,7 @@ using read_promise_t = std::promise<std::pair<persistent::version_t, Blob>>;
 
 struct RequestHeader {
     uint32_t requestType;
-    size_t key_size;
+    uint64_t version;
     uint64_t seq;
     uint32_t site_id;
     size_t payload_size;
@@ -230,10 +230,10 @@ public:
 };
 
 struct LinkedBufferNode {
-    std::string message_key;
     size_t message_size;
     char* message_body;
     uint32_t message_type;
+    uint64_t message_version;
     uint64_t global_seq;
     LinkedBufferNode* next;
 
@@ -290,6 +290,7 @@ private:
     int nServer;
     uint64_t global_send_seq_ctr = 0;
     uint64_t global_read_seq_ctr = 0;
+    uint64_t max_version = 0;
 
 public:
     std::vector<pre_operation> operations;
@@ -343,12 +344,14 @@ public:
     inline uint64_t new_read_seq() {
         return global_read_seq_ctr++;
     }
+    inline void update_max_version(const uint64_t& version) {
+        max_version = std::max(version, max_version);
+    }
     void recv_ack_loop();
     void recv_read_ack_loop();
     void check_read_tmp_store(const uint64_t seq, const persistent::version_t version, Blob&& obj);
-    uint64_t enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const std::string& key);
-    read_future_t read_enqueue(const std::string& key);
-    read_future_t seq_read_enqueue(const uint64_t seq);
+    uint64_t enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const uint64_t& version);
+    read_future_t read_enqueue(const uint64_t& version);
     void send_msg_loop();
     void read_msg_loop();
     void predicate_calculation();
@@ -415,16 +418,13 @@ public:
          * send the message
          */
     virtual void send(const char* message, const size_t message_size) {
-        this->message_sender->enqueue(1, message, message_size, "PURE_MESSAGE");
+        this->message_sender->enqueue(1, message, message_size, uint64_t(-1));
     }
-    virtual uint64_t send_write_req(const char* payload, const size_t payload_size, const std::string& key) {
-        return this->message_sender->enqueue(1, payload, payload_size, key);
+    virtual uint64_t send_write_req(const char* payload, const size_t payload_size, const uint64_t& version) {
+        return this->message_sender->enqueue(1, payload, payload_size, version);
     }
-    read_future_t send_read_req(const std::string& key) {
-        return std::move(this->message_sender->read_enqueue(key));
-    }
-    read_future_t send_seq_read_req(const uint64_t seq) {
-        return std::move(this->message_sender->seq_read_enqueue(seq));
+    read_future_t send_read_req(const uint64_t& version) {
+        return std::move(this->message_sender->read_enqueue(version));
     }
 
     void submit_predicate(std::string key, std::string predicate_str, bool inplace);

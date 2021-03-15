@@ -55,16 +55,16 @@ int do_client() {
     
     string op;
     char buf[derecho::getConfUInt64(CONF_SUBGROUP_DEFAULT_MAX_PAYLOAD_SIZE)];
-    string key;
+    uint64_t version;
 
     DeserializationManager DSM = {{}};
 
     string read_request_buf = "READ_REQUEST";
     uint64_t seq;
     while(cin >> op) {
-        if (op == "seq_read") {
+        if (op == "read") {
             cin >> seq;
-            auto res = wpcss_ec.p2p_send<RPC_NAME(seq_read)>(server_id, seq);
+            auto res = wpcss_ec.p2p_send<RPC_NAME(read)>(server_id, seq);
             wan_agent::Blob obj_bytes = res.get().get(server_id);
             cerr << "message size = " << obj_bytes.size << endl;
             if (strcmp(obj_bytes.bytes, "SEQ_NOT_FOUND") == 0) {
@@ -75,9 +75,9 @@ int do_client() {
                 cerr << (*obj) << endl;
             }
         } else if (op == "write") {
-            cin >> key >> buf;
-            ObjectWithStringKey o(key, Blob(buf, strlen(buf)));
-            auto res = wpcss_ec.p2p_send<RPC_NAME(write)>(server_id, o, key);
+            cin >> version >> buf;
+            ObjectWithStringKey o("WRITE_REQ", Blob(buf, strlen(buf)));
+            auto res = wpcss_ec.p2p_send<RPC_NAME(write)>(server_id, o, version);
             cerr << res.get().get(server_id) << endl;
         } else {
             cerr << "Invalid Operator" << endl;
