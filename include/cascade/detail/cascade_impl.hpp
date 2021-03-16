@@ -855,14 +855,20 @@ wan_agent::Blob WANPersistentCascadeStore<KT, VT, IK, IV, ST>::read(const uint64
 }
 
 template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
-uint64_t WANPersistentCascadeStore<KT, VT, IK, IV, ST>::write(const VT& value, const uint64_t& version) {
+uint64_t WANPersistentCascadeStore<KT, VT, IK, IV, ST>::write(const VT& value) {
     debug_enter_func_with_args("value.key={}", value.key);
     derecho::Replicated<WANPersistentCascadeStore>& subgroup_handle = group->template get_subgroup<WANPersistentCascadeStore>(this->subgroup_index);
     auto results = subgroup_handle.template ordered_send<RPC_NAME(ordered_put)>(value);
+    std::tuple<persistent::version_t, uint64_t> ret(CURRENT_VERSION, 0);
     auto& replies = results.get();
     for(auto& reply_pair : replies) {
-        reply_pair.second.get();
+        ret = reply_pair.second.get();
     }
+
+    auto version = std::get<0>(ret);
+
+    value.set_version(version);
+    value.set_timestamp(std::get<1>(ret));
 
     if(wan_sender_in_my_shard == static_cast<node_id_t>(-1)) {
         uint32_t shard_num = subgroup_handle.template get_shard_num();
@@ -875,10 +881,12 @@ uint64_t WANPersistentCascadeStore<KT, VT, IK, IV, ST>::write(const VT& value, c
     node_id_t my_id = getConfUInt32(CONF_DERECHO_LOCAL_ID);
 
     if(wan_sender_in_my_shard == my_id) {
-        return do_wan_agent_write(value, version);
+        do_wan_agent_write(value, version);
+        return version;
     } else {
         auto res = subgroup_handle.template p2p_send<RPC_NAME(do_wan_agent_write)>(wan_sender_in_my_shard, value, version);
-        return res.get().get(wan_sender_in_my_shard);
+        res.get();
+        return version;
     }
 }
 
@@ -926,7 +934,7 @@ void WANPersistentCascadeStore<KT, VT, IK, IV, ST>::do_wan_agent_send(const VT& 
 }
 
 template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
-uint64_t WANPersistentCascadeStore<KT, VT, IK, IV, ST>::do_wan_agent_write(const VT& value, const uint64_t& version) {
+void WANPersistentCascadeStore<KT, VT, IK, IV, ST>::do_wan_agent_write(const VT& value, const uint64_t& version) {
     if(!wan_agent_sender) {
         init_wan_config();
     }
@@ -942,25 +950,23 @@ uint64_t WANPersistentCascadeStore<KT, VT, IK, IV, ST>::do_wan_agent_write(const
 
     // do not use wan_agent::WAN_AGENT_MAX_PAYLOAD_SIZE, macro define is not constrained by namespace, even class definition, function definition
     const size_t wan_max_payload_size = wan_conf_json[WAN_AGENT_MAX_PAYLOAD_SIZE];
-    uint64_t ret = 0;
 
     if(actual_size < wan_max_payload_size) {
-        ret = wan_agent_sender->send_write_req(buffer, actual_size, version);
+        wan_agent_sender->send_write_req(buffer, actual_size, version);
     } else  // !!!! This will not work properly since each write request will create a new version !!!!
     {
         while(actual_size > wan_max_payload_size) {
-            ret = wan_agent_sender->send_write_req(buffer, wan_max_payload_size, version);
+            wan_agent_sender->send_write_req(buffer, wan_max_payload_size, version);
             buffer += wan_max_payload_size;
             actual_size -= wan_max_payload_size;
         }
         // if there is still some remain message
         if(actual_size > 0) {
-            ret = wan_agent_sender->send_write_req(buffer, actual_size, version);
+            wan_agent_sender->send_write_req(buffer, actual_size, version);
         }
     }
 
     debug_leave_func_with_value("Send to WanAgent server {} bytes.", actual_size);
-    return ret;
 }
 
 template <typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>

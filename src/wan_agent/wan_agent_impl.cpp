@@ -97,151 +97,151 @@ WanAgent::WanAgent(const nlohmann::json& wan_group_config, std::string log_level
     Logger::set_log_level(log_level);
 }
 
-RemoteMessageService::RemoteMessageService(const site_id_t local_site_id,
-                                           int num_senders,
-                                           unsigned short local_port,
-                                           const size_t max_payload_size,
-                                           const RemoteMessageCallback& rmc,
-                                           WanAgent* hugger)
-        : local_site_id(local_site_id),
-          num_senders(num_senders),
-          max_payload_size(max_payload_size),
-          rmc(rmc),
-          hugger(hugger) {
-    std::cout << "1: " << local_site_id << std::endl;
-    std::cout << "2" << std::endl;
-    sockaddr_in serv_addr;
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if(fd < 0)
-        throw std::runtime_error("RemoteMessageService failed to create socket.");
+// RemoteMessageService::RemoteMessageService(const site_id_t local_site_id,
+//                                            int num_senders,
+//                                            unsigned short local_port,
+//                                            const size_t max_payload_size,
+//                                            const RemoteMessageCallback& rmc,
+//                                            WanAgent* hugger)
+//         : local_site_id(local_site_id),
+//           num_senders(num_senders),
+//           max_payload_size(max_payload_size),
+//           rmc(rmc),
+//           hugger(hugger) {
+//     std::cout << "1: " << local_site_id << std::endl;
+//     std::cout << "2" << std::endl;
+//     sockaddr_in serv_addr;
+//     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+//     if(fd < 0)
+//         throw std::runtime_error("RemoteMessageService failed to create socket.");
 
-    int reuse_addr = 1;
-    if(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse_addr,
-                  sizeof(reuse_addr))
-       < 0) {
-        fprintf(stderr, "ERROR on setsockopt: %s\n", strerror(errno));
-    }
+//     int reuse_addr = 1;
+//     if(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse_addr,
+//                   sizeof(reuse_addr))
+//        < 0) {
+//         fprintf(stderr, "ERROR on setsockopt: %s\n", strerror(errno));
+//     }
 
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = INADDR_ANY;
-    serv_addr.sin_port = htons(local_port);
-    if(bind(fd, (sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-        fprintf(stderr, "ERROR on binding to socket: %s\n", strerror(errno));
-        throw std::runtime_error("RemoteMessageService failed to bind socket.");
-    }
-    listen(fd, 5);
-    server_socket = fd;
-    std::cout << "RemoteMessageService listening on " << local_port << std::endl;
-    // dbg_default_info("RemoteMessageService listening on {} ...", local_port);
-};
+//     memset(&serv_addr, 0, sizeof(serv_addr));
+//     serv_addr.sin_family = AF_INET;
+//     serv_addr.sin_addr.s_addr = INADDR_ANY;
+//     serv_addr.sin_port = htons(local_port);
+//     if(bind(fd, (sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+//         fprintf(stderr, "ERROR on binding to socket: %s\n", strerror(errno));
+//         throw std::runtime_error("RemoteMessageService failed to bind socket.");
+//     }
+//     listen(fd, 5);
+//     server_socket = fd;
+//     std::cout << "RemoteMessageService listening on " << local_port << std::endl;
+//     // dbg_default_info("RemoteMessageService listening on {} ...", local_port);
+// };
 
-void RemoteMessageService::establish_connections() {
-    // TODO: maybe support dynamic join later, i.e. having a infinite loop always listening for join requests?
-    while(worker_threads.size() < num_senders) {
-        struct sockaddr_storage client_addr_info;
-        socklen_t len = sizeof client_addr_info;
+// void RemoteMessageService::establish_connections() {
+//     // TODO: maybe support dynamic join later, i.e. having a infinite loop always listening for join requests?
+//     while(worker_threads.size() < num_senders) {
+//         struct sockaddr_storage client_addr_info;
+//         socklen_t len = sizeof client_addr_info;
 
-        int connected_sock_fd = ::accept(server_socket, (struct sockaddr*)&client_addr_info, &len);
-        worker_threads.emplace_back(std::thread(&RemoteMessageService::epoll_worker, this, connected_sock_fd));
-    }
-}
+//         int connected_sock_fd = ::accept(server_socket, (struct sockaddr*)&client_addr_info, &len);
+//         worker_threads.emplace_back(std::thread(&RemoteMessageService::epoll_worker, this, connected_sock_fd));
+//     }
+// }
 
-void RemoteMessageService::worker(int connected_sock_fd) {
-    RequestHeader header;
-    bool success;
-    std::unique_ptr<char[]> buffer = std::make_unique<char[]>(max_payload_size);
-    std::cout << "worker start" << std::endl;
-    while(1) {
-        if(connected_sock_fd < 0)
-            throw std::runtime_error("connected_sock_fd closed!");
+// void RemoteMessageService::worker(int connected_sock_fd) {
+//     RequestHeader header;
+//     bool success;
+//     std::unique_ptr<char[]> buffer = std::make_unique<char[]>(max_payload_size);
+//     std::cout << "worker start" << std::endl;
+//     while(1) {
+//         if(connected_sock_fd < 0)
+//             throw std::runtime_error("connected_sock_fd closed!");
 
-        success = sock_read(connected_sock_fd, header);
-        if(!success)
-            throw std::runtime_error("Failed to read request header");
+//         success = sock_read(connected_sock_fd, header);
+//         if(!success)
+//             throw std::runtime_error("Failed to read request header");
 
-        success = sock_read(connected_sock_fd, buffer.get(), header.payload_size);
-        if(!success)
-            throw std::runtime_error("Failed to read message");
+//         success = sock_read(connected_sock_fd, buffer.get(), header.payload_size);
+//         if(!success)
+//             throw std::runtime_error("Failed to read message");
 
-        // dbg_default_info("received msg {} from site {}", header.seq, header.site_id);
+//         // dbg_default_info("received msg {} from site {}", header.seq, header.site_id);
 
-        rmc(header.site_id, buffer.get(), header.payload_size);
-        success = sock_write(connected_sock_fd, Response{header.seq, local_site_id});
-        if(!success)
-            throw std::runtime_error("Failed to send ACK message");
-    }
-}
+//         rmc(header.site_id, buffer.get(), header.payload_size);
+//         success = sock_write(connected_sock_fd, Response{header.seq, local_site_id});
+//         if(!success)
+//             throw std::runtime_error("Failed to send ACK message");
+//     }
+// }
 
-void RemoteMessageService::epoll_worker(int connected_sock_fd) {
-    RequestHeader header;
-    std::unique_ptr<char[]> buffer = std::make_unique<char[]>(max_payload_size);
-    bool success;
-    std::cout << "epoll_worker start\n";
+// void RemoteMessageService::epoll_worker(int connected_sock_fd) {
+//     RequestHeader header;
+//     std::unique_ptr<char[]> buffer = std::make_unique<char[]>(max_payload_size);
+//     bool success;
+//     std::cout << "epoll_worker start\n";
 
-    int epoll_fd_recv_msg = epoll_create1(0);
-    if(epoll_fd_recv_msg == -1)
-        throw std::runtime_error("failed to create epoll fd");
-    add_epoll(epoll_fd_recv_msg, EPOLLIN, connected_sock_fd);
+//     int epoll_fd_recv_msg = epoll_create1(0);
+//     if(epoll_fd_recv_msg == -1)
+//         throw std::runtime_error("failed to create epoll fd");
+//     add_epoll(epoll_fd_recv_msg, EPOLLIN, connected_sock_fd);
 
-    std::cout << "The connected_sock_fd is " << connected_sock_fd << std::endl;
+//     std::cout << "The connected_sock_fd is " << connected_sock_fd << std::endl;
 
-    struct epoll_event events[EPOLL_MAXEVENTS];
-    while(!hugger->get_is_shutdown()) {
-        int n = epoll_wait(epoll_fd_recv_msg, events, EPOLL_MAXEVENTS, -1);
-        for(int i = 0; i < n; i++) {
-            if(events[i].events & EPOLLIN) {
-                std::cout << "get event from fd " << events[i].data.fd << std::endl;
-                // get msg from sender
-                success = sock_read(connected_sock_fd, header);
-                if(!success) {
-                    std::cout << "Failed to read request header, "
-                              << "receive " << n << " messages from sender.\n";
-                    throw std::runtime_error("Failed to read request header");
-                }
-                success = sock_read(connected_sock_fd, buffer.get(), header.payload_size);
-                if(!success)
-                    throw std::runtime_error("Failed to read message");
+//     struct epoll_event events[EPOLL_MAXEVENTS];
+//     while(!hugger->get_is_shutdown()) {
+//         int n = epoll_wait(epoll_fd_recv_msg, events, EPOLL_MAXEVENTS, -1);
+//         for(int i = 0; i < n; i++) {
+//             if(events[i].events & EPOLLIN) {
+//                 std::cout << "get event from fd " << events[i].data.fd << std::endl;
+//                 // get msg from sender
+//                 success = sock_read(connected_sock_fd, header);
+//                 if(!success) {
+//                     std::cout << "Failed to read request header, "
+//                               << "receive " << n << " messages from sender.\n";
+//                     throw std::runtime_error("Failed to read request header");
+//                 }
+//                 success = sock_read(connected_sock_fd, buffer.get(), header.payload_size);
+//                 if(!success)
+//                     throw std::runtime_error("Failed to read message");
 
-                // dbg_default_info("received msg {} from site {}", header.seq, header.site_id);
+//                 // dbg_default_info("received msg {} from site {}", header.seq, header.site_id);
 
-                rmc(header.site_id, buffer.get(), header.payload_size);
-                success = sock_write(connected_sock_fd, Response{header.seq, local_site_id});
-                if(!success)
-                    throw std::runtime_error("Failed to send ACK message");
-            }
-        }
-    }
-}
+//                 rmc(header.site_id, buffer.get(), header.payload_size);
+//                 success = sock_write(connected_sock_fd, Response{header.seq, local_site_id});
+//                 if(!success)
+//                     throw std::runtime_error("Failed to send ACK message");
+//             }
+//         }
+//     }
+// }
 
-WanAgentServer::WanAgentServer(const nlohmann::json& wan_group_config,
-                               const RemoteMessageCallback& rmc, std::string log_level)
-        : WanAgent(wan_group_config, log_level),
-          remote_message_callback(rmc),
-          remote_message_service(
-                  local_site_id,
-                  num_senders,
-                  local_port,
-                  wan_group_config[WAN_AGENT_MAX_PAYLOAD_SIZE],
-                  rmc,
-                  this) {
-    std::thread rms_establish_thread(&RemoteMessageService::establish_connections, &remote_message_service);
-    rms_establish_thread.detach();
+// WanAgentServer::WanAgentServer(const nlohmann::json& wan_group_config,
+//                                const RemoteMessageCallback& rmc, std::string log_level)
+//         : WanAgent(wan_group_config, log_level),
+//           remote_message_callback(rmc),
+//           remote_message_service(
+//                   local_site_id,
+//                   num_senders,
+//                   local_port,
+//                   wan_group_config[WAN_AGENT_MAX_PAYLOAD_SIZE],
+//                   rmc,
+//                   this) {
+//     std::thread rms_establish_thread(&RemoteMessageService::establish_connections, &remote_message_service);
+//     rms_establish_thread.detach();
 
-    // deprecated
-    // // TODO: for now, all sites must start in 3 seconds; to be replaced with retry mechanism when establishing sockets
-    // sleep(3);
+//     // deprecated
+//     // // TODO: for now, all sites must start in 3 seconds; to be replaced with retry mechanism when establishing sockets
+//     // sleep(3);
 
-    std::cout << "Press ENTER to kill." << std::endl;
-    std::cin.get();
-    shutdown_and_wait();
-}
+//     std::cout << "Press ENTER to kill." << std::endl;
+//     std::cin.get();
+//     shutdown_and_wait();
+// }
 
-void WanAgentServer::shutdown_and_wait() {
-    log_enter_func();
-    is_shutdown.store(true);
-    log_exit_func();
-}
+// void WanAgentServer::shutdown_and_wait() {
+//     log_enter_func();
+//     is_shutdown.store(true);
+//     log_exit_func();
+// }
 
 MessageSender::MessageSender(const site_id_t& local_site_id,
                              const std::map<site_id_t, std::pair<ip_addr_t, uint16_t>>& server_sites_ip_addrs_and_ports,
@@ -359,7 +359,7 @@ void MessageSender::recv_ack_loop() {
                     throw std::runtime_error("failed receiving ACK message");
                 }
                 std::cout << "received ACK from " << res.site_id << " for msg " << res.seq << std::endl;
-                if(message_counters[res.site_id] != res.seq) {
+                if(message_counters[res.site_id] != res.version) {
                     throw std::runtime_error("sequence number is out of order for site-" + std::to_string(res.site_id) + ", counter = " + std::to_string(message_counters[res.site_id].load()) + ", seqno = " + std::to_string(res.seq));
                 }
                 message_counters[res.site_id]++;
@@ -557,7 +557,7 @@ void MessageSender::wait_stability_frontier_loop(int sf) {
     stability_frontier_set_cv.notify_one();
 }
 
-uint64_t MessageSender::enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const uint64_t& version) {
+void MessageSender::enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const uint64_t& version) {
         // std::unique_lock<std::mutex> lock(mutex);
     size_mutex.lock();
     LinkedBufferNode* tmp = new LinkedBufferNode();
@@ -571,13 +571,11 @@ uint64_t MessageSender::enqueue(const uint32_t requestType, const char* payload,
     }
     tmp->message_type = requestType;
     tmp->message_version = version;
-    tmp->global_seq = new_send_seq();
 
     buffer_list.push_back(*tmp);
     enter_queue_time_keeper[msg_idx++] = get_time_us();
     size_mutex.unlock();
     not_empty.notify_one();
-    return tmp->global_seq;
 }
 
 read_future_t MessageSender::read_enqueue(const uint64_t& version) {
@@ -587,13 +585,12 @@ read_future_t MessageSender::read_enqueue(const uint64_t& version) {
     tmp->message_size = 0;
     tmp->message_type = 0;
     tmp->message_version = version;
-    tmp->global_seq = new_read_seq(); //separate read sequence number from send sequence number
 
     //set the read promise store before push_back
     read_promise_lock.lock();
     read_promise_t new_promise;
     read_future_t ret_future = new_promise.get_future();
-    read_promise_store.emplace(tmp->global_seq, std::move(new_promise));
+    read_promise_store.emplace(version, std::move(new_promise));
     read_promise_lock.unlock();
 
     read_buffer_list.push_back(*tmp);
@@ -633,13 +630,14 @@ void MessageSender::send_msg_loop() {
                 // decode paylaod_size in the beginning
                 // memcpy(&payload_size, buf[pos].get(), sizeof(size_t));
                 auto curr_seqno = last_sent_seqno[site_id] + 1;
-                if (curr_seqno != node.global_seq) {
+                if (curr_seqno != node.message_version) {
+                    std::cout << curr_seqno << ' ' << node.message_version << std::endl;
                     throw std::runtime_error("Something wrong with the seq number");
                 }
                 // log_info("sending msg {} to site {}.", curr_seqno, site_id);
                 // send over socket
                 // time_keeper[curr_seqno*4+site_id-1] = now_us();
-                sock_write(events[i].data.fd, RequestHeader{requestType, version, curr_seqno, local_site_id, payload_size});
+                sock_write(events[i].data.fd, RequestHeader{requestType, version, local_site_id, payload_size});
                 sock_write(events[i].data.fd, version);
                 if (payload_size)
                     sock_write(events[i].data.fd, node.message_body, payload_size);
@@ -699,11 +697,7 @@ void MessageSender::read_msg_loop() {
                 auto requestType = node.message_type;
                 auto version = node.message_version;
                 auto curr_seqno = R_last_sent_seqno[site_id] + 1;
-                if (curr_seqno != node.global_seq) {
-                    throw std::runtime_error("Something wrong with the seq number");
-                }
-                sock_write(events[i].data.fd, RequestHeader{requestType, version, curr_seqno, local_site_id, payload_size});
-                sock_write(events[i].data.fd, version);
+                sock_write(events[i].data.fd, RequestHeader{requestType, version, local_site_id, payload_size});
                 if (payload_size) {
                     throw std::runtime_error("Something went wrong with read requests");
                 }

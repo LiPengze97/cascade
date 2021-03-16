@@ -36,13 +36,13 @@ target_include_directories(wan_agent PUBLIC
 # target_link_libraries(wan_agent wan_logger wan_agent_utils)
 target_link_libraries(wan_agent predicate_generator)
 
-add_executable(wan_agent_server wan_agent_server.cpp)
-target_include_directories(wan_agent_server PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
-)
-target_link_libraries(wan_agent_server wan_agent pthread predicate_generator)
+# add_executable(wan_agent_server wan_agent_server.cpp)
+# target_include_directories(wan_agent_server PUBLIC
+#    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
+#    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+#    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+#)
+#target_link_libraries(wan_agent_server wan_agent pthread predicate_generator)
 
 add_executable(wan_agent_sender wan_agent_sender.cpp)
 target_include_directories(wan_agent_sender PUBLIC

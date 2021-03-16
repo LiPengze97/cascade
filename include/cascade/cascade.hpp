@@ -474,7 +474,7 @@ public:
     virtual std::tuple<persistent::version_t, uint64_t> put(
             const VT& value) override;
     wan_agent::Blob read(const uint64_t& version);
-    uint64_t write(const VT& value, const uint64_t& version);
+    uint64_t write(const VT& value);
     virtual std::tuple<persistent::version_t, uint64_t> remove(
             const KT& key) override;
     virtual const VT get(const KT& key,
@@ -512,7 +512,7 @@ public:
 
     void do_wan_agent_send(const VT& value);
     wan_agent::Blob do_wan_agent_read(const uint64_t& version);
-    uint64_t do_wan_agent_write(const VT& value, const uint64_t& version);
+    void do_wan_agent_write(const VT& value, const uint64_t& version);
     void set_wan_sender_info(const node_id_t sender_id);
 
     void set_stability_frontier(int sf);

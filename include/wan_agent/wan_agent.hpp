@@ -75,14 +75,13 @@ using read_promise_t = std::promise<std::pair<persistent::version_t, Blob>>;
 struct RequestHeader {
     uint32_t requestType;
     uint64_t version;
-    uint64_t seq;
     uint32_t site_id;
     size_t payload_size;
 };
 
 struct Response {
     size_t payload_size;
-    uint64_t seq;
+    uint64_t version;
     uint32_t site_id;
 };
 
@@ -91,7 +90,7 @@ struct Response {
      * @param const RequestHeader&: the copy of request header
      * @param const char*: message in byte array
      */
-using RemoteMessageCallback = std::function<void(const uint32_t, const char*, const size_t)>;
+// using RemoteMessageCallback = std::function<void(const uint32_t, const char*, const size_t)>;
 
 /**
      * The Wan Agent abstract class
@@ -160,81 +159,80 @@ public:
 
 // class WanAgentServer;
 // the Server worker
-class RemoteMessageService final {
-private:
-    const site_id_t local_site_id;
+// class RemoteMessageService final {
+// private:
+//     const site_id_t local_site_id;
 
-    size_t num_senders;
-    const size_t max_payload_size;
-    const RemoteMessageCallback rmc;
+//     size_t num_senders;
+//     const size_t max_payload_size;
+//     const RemoteMessageCallback rmc;
 
-    std::list<std::thread> worker_threads;
+//     std::list<std::thread> worker_threads;
 
-    int server_socket;
-    /**
-         * configuration
-         */
-    const nlohmann::json config;
+//     int server_socket;
+//     /**
+//          * configuration
+//          */
+//     const nlohmann::json config;
 
-    const WanAgent* hugger;
+//     const WanAgent* hugger;
 
-    // use epoll to get message from senders.
+//     // use epoll to get message from senders.
 
-public:
-    RemoteMessageService(const site_id_t local_site_id,
-                         int num_senders,
-                         unsigned short local_port,
-                         const size_t max_payload_size,
-                         const RemoteMessageCallback& rmc,
-                         WanAgent* hugger);
+// public:
+//     RemoteMessageService(const site_id_t local_site_id,
+//                          int num_senders,
+//                          unsigned short local_port,
+//                          const size_t max_payload_size,
+//                          const RemoteMessageCallback& rmc,
+//                          WanAgent* hugger);
 
-    void establish_connections();
+//     void establish_connections();
 
-    void worker(int sock);
-    void epoll_worker(int sock);
+//     void worker(int sock);
+//     void epoll_worker(int sock);
 
-    bool is_server_ready();
-};
+//     bool is_server_ready();
+// };
 
-class WanAgentServer : public WanAgent {
-private:
-    /** 
-         * remote_message_callback is called when a new message is received.
-         */
-    const RemoteMessageCallback& remote_message_callback;
+// class WanAgentServer : public WanAgent {
+// private:
+//     /** 
+//          * remote_message_callback is called when a new message is received.
+//          */
+//     const RemoteMessageCallback& remote_message_callback;
 
-    RemoteMessageService remote_message_service;
-    // the conditional variable for initialization
-    std::mutex ready_mutex;            // TODO: 思考下ready的作用究竟是什么
-    std::condition_variable ready_cv;  // TODO: 思考下ready的作用究竟是什么
+//     RemoteMessageService remote_message_service;
+//     // the conditional variable for initialization
+//     std::mutex ready_mutex;            // TODO: 思考下ready的作用究竟是什么
+//     std::condition_variable ready_cv;  // TODO: 思考下ready的作用究竟是什么
 
-public:
-    WanAgentServer(const nlohmann::json& wan_group_config,
-                   const RemoteMessageCallback& rmc, std::string log_level = "trace");
-    ~WanAgentServer() {}
+// public:
+//     WanAgentServer(const nlohmann::json& wan_group_config,
+//                    const RemoteMessageCallback& rmc, std::string log_level = "trace");
+//     ~WanAgentServer() {}
 
-    // bool is_ready()
-    // {
-    //     if (!remote_message_service.is_server_ready())
-    //     {
-    //         return false;
-    //     }
+//     // bool is_ready()
+//     // {
+//     //     if (!remote_message_service.is_server_ready())
+//     //     {
+//     //         return false;
+//     //     }
 
-    //     return true;
-    // }
+//     //     return true;
+//     // }
 
-    /**
-         * shutdown the wan agent service and block until finished.
-         */
-    virtual void shutdown_and_wait() noexcept(false) override;
-};
+//     /**
+//          * shutdown the wan agent service and block until finished.
+//          */
+//     virtual void shutdown_and_wait() noexcept(false) override;
+// };
 
 struct LinkedBufferNode {
     size_t message_size;
     char* message_body;
     uint32_t message_type;
     uint64_t message_version;
-    uint64_t global_seq;
     LinkedBufferNode* next;
 
     LinkedBufferNode() {}
@@ -288,8 +286,6 @@ private:
     const int N_MSG = 520000;
 
     int nServer;
-    uint64_t global_send_seq_ctr = 0;
-    uint64_t global_read_seq_ctr = 0;
     uint64_t max_version = 0;
 
 public:
@@ -338,19 +334,13 @@ public:
                   const size_t& n_slots, const size_t& max_payload_size,
                   std::map<site_id_t, std::atomic<uint64_t>>& message_counters,
                   const ReportACKFunc& report_new_ack);
-    inline uint64_t new_send_seq() {
-        return global_send_seq_ctr++;
-    }
-    inline uint64_t new_read_seq() {
-        return global_read_seq_ctr++;
-    }
     inline void update_max_version(const uint64_t& version) {
         max_version = std::max(version, max_version);
     }
     void recv_ack_loop();
     void recv_read_ack_loop();
     void check_read_tmp_store(const uint64_t seq, const persistent::version_t version, Blob&& obj);
-    uint64_t enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const uint64_t& version);
+    void enqueue(const uint32_t requestType, const char* payload, const size_t payload_size, const uint64_t& version);
     read_future_t read_enqueue(const uint64_t& version);
     void send_msg_loop();
     void read_msg_loop();
@@ -420,10 +410,10 @@ public:
     virtual void send(const char* message, const size_t message_size) {
         this->message_sender->enqueue(1, message, message_size, uint64_t(-1));
     }
-    virtual uint64_t send_write_req(const char* payload, const size_t payload_size, const uint64_t& version) {
+    virtual void send_write_req(const char* payload, const size_t payload_size, const uint64_t& version) {
         return this->message_sender->enqueue(1, payload, payload_size, version);
     }
-    read_future_t send_read_req(const uint64_t& version) {
+    virtual read_future_t send_read_req(const uint64_t& version) {
         return std::move(this->message_sender->read_enqueue(version));
     }
 
