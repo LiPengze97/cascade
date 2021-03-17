@@ -64,8 +64,9 @@ int do_client() {
         if (op == "read") {
             cin >> version;
             auto res = wpcss_ec.p2p_send<RPC_NAME(read)>(server_id, version);
-            wan_agent::Blob obj_bytes = res.get().get(server_id);
+            wan_agent::Blob obj_bytes = std::move(res.get().get(server_id));
             cerr << "message size = " << obj_bytes.size << endl;
+            cerr << obj_bytes.bytes << endl;
             if (strcmp(obj_bytes.bytes, "SEQ_NOT_FOUND") == 0) {
                 cerr << obj_bytes.bytes << endl;
             }

@@ -358,10 +358,7 @@ void MessageSender::recv_ack_loop() {
                 if (!success) {
                     throw std::runtime_error("failed receiving ACK message");
                 }
-                std::cout << "received ACK from " << res.site_id << " for msg " << res.seq << std::endl;
-                if(message_counters[res.site_id] != res.version) {
-                    throw std::runtime_error("sequence number is out of order for site-" + std::to_string(res.site_id) + ", counter = " + std::to_string(message_counters[res.site_id].load()) + ", seqno = " + std::to_string(res.seq));
-                }
+                std::cout << "received ACK from " << res.site_id << " for msg " << res.version << std::endl;
                 message_counters[res.site_id]++;
                 uint64_t pre_cal_st_time = get_time_us();
                 predicate_calculation();
@@ -390,20 +387,17 @@ void MessageSender::recv_read_ack_loop() {
                 if (!success) {
                     throw std::runtime_error("failed receiving ACK message");
                 }
-                std::cout << "received read ACK from " << res.site_id << " for msg " << res.seq << std::endl;
+                std::cout << "received read ACK from " << res.site_id << " for msg " << res.version << std::endl;
                 auto obj_size = res.payload_size;
                 std::cout << "obj_size = " << obj_size << std::endl;
                 if (obj_size) {
-                    persistent::version_t new_version;
-                    std::cout << "receiving version" << std::endl;
-                    success = sock_read(events[i].data.fd, new_version);
                     char* obj_buf = (char*)malloc(obj_size);
                     std::cout << "receiving object" << std::endl;
-                    success &= sock_read(events[i].data.fd, obj_buf, obj_size);
+                    success = sock_read(events[i].data.fd, obj_buf, obj_size);
                     if (!success)
                         throw std::runtime_error("failed receiving object for read request");
-                    std::cout << "version = " << new_version << ' ' << "obj_size = " << obj_size << std::endl;
-                    check_read_tmp_store(res.seq, new_version, std::move(Blob(std::move(obj_buf), obj_size)));
+                    std::cout << "version = " << res.version << ' ' << "obj_size = " << obj_size << std::endl;
+                    check_read_tmp_store(res.version, res.version, std::move(Blob(std::move(obj_buf), obj_size)));
                 }
             }
         }
@@ -629,16 +623,12 @@ void MessageSender::send_msg_loop() {
                 auto version = node.message_version;
                 // decode paylaod_size in the beginning
                 // memcpy(&payload_size, buf[pos].get(), sizeof(size_t));
-                auto curr_seqno = last_sent_seqno[site_id] + 1;
-                if (curr_seqno != node.message_version) {
-                    std::cout << curr_seqno << ' ' << node.message_version << std::endl;
-                    throw std::runtime_error("Something wrong with the seq number");
-                }
+                auto curr_seqno = version;
+                std::cerr << "curr_seqno = " << curr_seqno << std::endl;
                 // log_info("sending msg {} to site {}.", curr_seqno, site_id);
                 // send over socket
                 // time_keeper[curr_seqno*4+site_id-1] = now_us();
                 sock_write(events[i].data.fd, RequestHeader{requestType, version, local_site_id, payload_size});
-                sock_write(events[i].data.fd, version);
                 if (payload_size)
                     sock_write(events[i].data.fd, node.message_body, payload_size);
                 leave_queue_time_keeper[curr_seqno * 7 + site_id - 1000] = get_time_us();
@@ -661,14 +651,13 @@ void MessageSender::send_msg_loop() {
         // || min_element == 0 will skip the comparison with static_cast<uint64_t>(-1)
         if(it->second > last_all_sent_seqno || (last_all_sent_seqno == static_cast<uint64_t>(-1) && it->second == 0)) {
             // log_info("{} has been sent to all remote sites, ", it->second);
-            assert(it->second - last_all_sent_seqno == 1);
             // std::unique_lock<std::mutex> list_lock(list_mutex);
             size_mutex.lock();
             buffer_list.pop_front();
             // list_lock.lock();
             size_mutex.unlock();
             // list_lock.unlock();
-            last_all_sent_seqno++;
+            last_all_sent_seqno = it->second; //*****!!!!
         }
         lock.unlock();
     }
