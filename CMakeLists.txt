@@ -40,6 +40,8 @@ find_package(nlohmann_json 3.2.0 REQUIRED)
 # predicate_generator
 find_package(predicate_generator REQUIRED)
 
+find_package(wan_agent REQUIRED)
+
 set(CMAKE_REQUIRED_DEFINITIONS -DFUSE_USE_VERSION=30)
 include(CheckIncludeFiles)
 
@@ -90,11 +92,11 @@ add_dependencies(cascade core)
 #         include/wan_agent_utils
 #         DESTINATION include)
 
-install(TARGETS wan_agent EXPORT wan_agent
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(DIRECTORY
-        include/wan_agent
-        DESTINATION include)
+# install(TARGETS wan_agent EXPORT wan_agent
+#         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+# install(DIRECTORY
+#         include/wan_agent
+#         DESTINATION include)
 
 install(TARGETS cascade EXPORT cascade
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
@@ -117,8 +119,8 @@ write_basic_package_version_file(
 # export (EXPORT wan_agent_utils
 #     FILE "${CMAKE_CURRENT_BINARY_DIR}/wan_agent_utils/wan_agent_utilsTargets.cmake")
 
-export (EXPORT wan_agent
-    FILE "${CMAKE_CURRENT_BINARY_DIR}/wan_agent/wan_agentTargets.cmake")
+# export (EXPORT wan_agent
+#     FILE "${CMAKE_CURRENT_BINARY_DIR}/wan_agent/wan_agentTargets.cmake")
 
 export (EXPORT cascade
     FILE "${CMAKE_CURRENT_BINARY_DIR}/cascade/cascadeTargets.cmake"
@@ -138,10 +140,10 @@ set(ConfigPackageLocation lib/cmake/cascade)
 #     DESTINATION ${ConfigPackageLocation}
 # )
 
-install(EXPORT wan_agent
-    FILE wan_agentTargets.cmake
-    DESTINATION ${ConfigPackageLocation}
-)
+# install(EXPORT wan_agent
+#     FILE wan_agentTargets.cmake
+#     DESTINATION ${ConfigPackageLocation}
+# )
 install(EXPORT cascade
     FILE cascadeTargets.cmake
     DESTINATION ${ConfigPackageLocation}
